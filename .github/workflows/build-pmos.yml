@@ -12,14 +12,6 @@ on:
           - xfce4
           - phosh
           - console
-      channel:
-        description: "postmarketOS channel"
-        required: true
-        default: "edge"
-        type: choice
-        options:
-          - edge
-          - v24.12
 
 jobs:
   build:
@@ -63,121 +55,38 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           ln -sf "$HOME/pmbootstrap/pmbootstrap.py" "$HOME/.local/bin/pmbootstrap"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/pmbootstrap" --version
+          pmbootstrap --version
 
-      - name: Create pmbootstrap config directly
-        shell: bash
+      - name: Initialize pmbootstrap with defaults
         run: |
-          mkdir -p "$HOME/.config"
-          mkdir -p "$HOME/.local/var/pmbootstrap"
+          yes "" | pmbootstrap --details-to-stdout init
 
-          cat > "$HOME/.config/pmbootstrap.cfg" <<EOF
-          [pmbootstrap]
-          work = /home/runner/.local/var/pmbootstrap
-          device = samsung-dream
-          kernel = dream2lte
-          user = duy
-          ui = ${{ github.event.inputs.ui }}
-          extra_packages =
-          hostname = s8plus-pmos
-          jobs = 2
-          ccache_size = 0
-          nonfree_firmware = True
-          nonfree_userland = False
-          build_pkgs_on_install = False
-          ssh_keys = False
-          timezone = Asia/Ho_Chi_Minh
-          locale = en_US.UTF-8
-          keymap =
-          boot_size = 512
-          extra_space = 512
-          sudo_timer = False
-          is_default_channel = False
-
-          [providers]
-          EOF
-
-          echo "Created config:"
-          cat "$HOME/.config/pmbootstrap.cfg"
-
-      - name: Initialize pmbootstrap using config
+      - name: Configure target device
         run: |
-          pmbootstrap --details-to-stdout init <<EOF
-
-          ${{ github.event.inputs.channel }}
-          samsung
-          dream
-          dream2lte
-          y
-          duy
-          iwd
-          ${{ github.event.inputs.ui }}
-
-          en_US.UTF-8
-          s8plus-pmos
-          n
-          n
-          y
-          EOF
-
-      - name: Force correct config after init
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from configparser import ConfigParser
-          from pathlib import Path
-
-          cfg_path = Path.home() / ".config" / "pmbootstrap.cfg"
-          cfg = ConfigParser()
-          cfg.read(cfg_path)
-
-          if not cfg.has_section("pmbootstrap"):
-              cfg.add_section("pmbootstrap")
-
-          values = {
-              "work": "/home/runner/.local/var/pmbootstrap",
-              "device": "samsung-dream",
-              "kernel": "dream2lte",
-              "user": "duy",
-              "ui": "${{ github.event.inputs.ui }}",
-              "extra_packages": "",
-              "hostname": "s8plus-pmos",
-              "jobs": "2",
-              "ccache_size": "0",
-              "nonfree_firmware": "True",
-              "nonfree_userland": "False",
-              "build_pkgs_on_install": "False",
-              "ssh_keys": "False",
-              "timezone": "Asia/Ho_Chi_Minh",
-              "locale": "en_US.UTF-8",
-              "keymap": "",
-              "boot_size": "512",
-              "extra_space": "512",
-              "sudo_timer": "False",
-              "is_default_channel": "False",
-          }
-
-          for k, v in values.items():
-              cfg.set("pmbootstrap", k, v)
-
-          if not cfg.has_section("providers"):
-              cfg.add_section("providers")
-
-          with open(cfg_path, "w") as f:
-              cfg.write(f)
-
-          print(cfg_path.read_text())
-          PY
+          pmbootstrap config device samsung-dream
+          pmbootstrap config kernel dream2lte
+          pmbootstrap config user duy
+          pmbootstrap config ui "${{ github.event.inputs.ui }}"
+          pmbootstrap config hostname s8plus-pmos
+          pmbootstrap config locale en_US.UTF-8
+          pmbootstrap config timezone Asia/Ho_Chi_Minh
+          pmbootstrap config jobs 2
+          pmbootstrap config ccache_size 0
+          pmbootstrap config extra_packages device-samsung-dream-nonfree-firmware
+          pmbootstrap config providers iwd || true
+          pmbootstrap config ssh_keys False || true
 
       - name: Show pmbootstrap status and config
         run: |
           pmbootstrap status || true
           pmbootstrap config || true
-          cat "$HOME/.config/pmbootstrap.cfg"
 
       - name: Build Android recovery ZIP
         run: |
-          pmbootstrap --details-to-stdout install --android-recovery-zip --no-fde
+          pmbootstrap --details-to-stdout install \
+            --android-recovery-zip \
+            --recovery-install-partition=data \
+            --password "123456"
 
       - name: Export files
         run: |
