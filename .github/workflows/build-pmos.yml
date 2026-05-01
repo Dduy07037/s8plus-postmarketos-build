@@ -72,11 +72,11 @@ jobs:
           pmbootstrap config timezone Asia/Ho_Chi_Minh
           pmbootstrap config jobs 2
           pmbootstrap config ccache_size 0
-          pmbootstrap config extra_packages device-samsung-dream-nonfree-firmware
+          pmbootstrap config extra_packages "device-samsung-dream-nonfree-firmware postmarketos-mkinitfs-hook-debug-shell"
           pmbootstrap config build_pkgs_on_install True || true
           pmbootstrap config ssh_keys False || true
 
-      - name: Patch samsung-dream sector size for UFS
+      - name: Patch samsung-dream sector size and debug shell
         shell: bash
         run: |
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
@@ -91,7 +91,7 @@ jobs:
           test -n "$APKBUILD"
 
           echo "Before patch:"
-          grep -n "deviceinfo_rootfs_image_sector_size" "$DEVICEINFO" || true
+          grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline" "$DEVICEINFO" || true
 
           if grep -q "^deviceinfo_rootfs_image_sector_size=" "$DEVICEINFO"; then
             sed -i 's/^deviceinfo_rootfs_image_sector_size=.*/deviceinfo_rootfs_image_sector_size="4096"/' "$DEVICEINFO"
@@ -99,8 +99,10 @@ jobs:
             echo 'deviceinfo_rootfs_image_sector_size="4096"' >> "$DEVICEINFO"
           fi
 
+          printf '%s\n' '' '# Forced debug build for boot diagnosis' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} pmos.debug-shell PMOS_NO_OUTPUT_REDIRECT loglevel=7"' >> "$DEVICEINFO"
+
           echo "After patch:"
-          grep -n "deviceinfo_rootfs_image_sector_size" "$DEVICEINFO"
+          grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline" "$DEVICEINFO" || true
 
           echo "Bump pkgrel:"
           sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
