@@ -32,6 +32,9 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af || true
           sudo apt clean
           df -h
 
@@ -51,7 +54,6 @@ jobs:
             python3 \
             python3-pip \
             python3-venv \
-            expect \
             android-tools-adb \
             android-tools-fastboot
 
@@ -63,74 +65,119 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/pmbootstrap" --version
 
-      - name: Initialize pmbootstrap for Samsung Galaxy S8 Plus
+      - name: Create pmbootstrap config directly
         shell: bash
         run: |
-          cat > init-pmbootstrap.expect <<'EOF'
-          #!/usr/bin/expect -f
-          set timeout -1
-          spawn pmbootstrap --details-to-stdout init
+          mkdir -p "$HOME/.config"
+          mkdir -p "$HOME/.local/var/pmbootstrap"
 
-          expect {
-            -re {Work path.*:} {
-              send "\r"
-              exp_continue
-            }
-            -re {release channel.*:|Channel.*:|Choose.*channel.*:} {
-              send "$env(PMOS_CHANNEL)\r"
-              exp_continue
-            }
-            -re {Vendor.*:} {
-              send "samsung\r"
-              exp_continue
-            }
-            -re {Device codename.*:|Device.*:} {
-              send "dream\r"
-              exp_continue
-            }
-            -re {.*dream2lte.*variant.*:|.*kernel.*dream2lte.*:|.*dreamlte.*dream2lte.*:} {
-              send "dream2lte\r"
-              exp_continue
-            }
-            -re {Username.*:|User.*:} {
-              send "duy\r"
-              exp_continue
-            }
-            -re {Provider.*:|Wi-Fi.*backend.*:|Network.*provider.*:} {
-              send "\r"
-              exp_continue
-            }
-            -re {User interface.*:|Interface.*:|UI.*:} {
-              send "$env(PMOS_UI)\r"
-              exp_continue
-            }
-            -re {Extra packages.*:|Additional packages.*:} {
-              send "\r"
-              exp_continue
-            }
-            -re {non-free.*firmware.*:|firmware.*nonfree.*:|Install.*firmware.*:} {
-              send "y\r"
-              exp_continue
-            }
-            -re {Change.*mirror.*:|Use this timezone.*:|Build outdated packages.*:|Enable background timer.*:|Extra free space.*:|Boot partition size.*:|Parallel jobs.*:|ccache.*:} {
-              send "\r"
-              exp_continue
-            }
-            eof
-          }
+          cat > "$HOME/.config/pmbootstrap.cfg" <<EOF
+          [pmbootstrap]
+          work = /home/runner/.local/var/pmbootstrap
+          device = samsung-dream
+          kernel = dream2lte
+          user = duy
+          ui = ${{ github.event.inputs.ui }}
+          extra_packages =
+          hostname = s8plus-pmos
+          jobs = 2
+          ccache_size = 0
+          nonfree_firmware = True
+          nonfree_userland = False
+          build_pkgs_on_install = False
+          ssh_keys = False
+          timezone = Asia/Ho_Chi_Minh
+          locale = en_US.UTF-8
+          keymap =
+          boot_size = 512
+          extra_space = 512
+          sudo_timer = False
+          is_default_channel = False
+
+          [providers]
           EOF
 
-          chmod +x init-pmbootstrap.expect
-          PMOS_UI="${{ github.event.inputs.ui }}" PMOS_CHANNEL="${{ github.event.inputs.channel }}" ./init-pmbootstrap.expect
+          echo "Created config:"
+          cat "$HOME/.config/pmbootstrap.cfg"
 
-      - name: Show pmbootstrap config
+      - name: Initialize pmbootstrap using config
+        run: |
+          pmbootstrap --details-to-stdout init <<EOF
+
+          ${{ github.event.inputs.channel }}
+          samsung
+          dream
+          dream2lte
+          y
+          duy
+          iwd
+          ${{ github.event.inputs.ui }}
+
+          en_US.UTF-8
+          s8plus-pmos
+          n
+          n
+          y
+          EOF
+
+      - name: Force correct config after init
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from configparser import ConfigParser
+          from pathlib import Path
+
+          cfg_path = Path.home() / ".config" / "pmbootstrap.cfg"
+          cfg = ConfigParser()
+          cfg.read(cfg_path)
+
+          if not cfg.has_section("pmbootstrap"):
+              cfg.add_section("pmbootstrap")
+
+          values = {
+              "work": "/home/runner/.local/var/pmbootstrap",
+              "device": "samsung-dream",
+              "kernel": "dream2lte",
+              "user": "duy",
+              "ui": "${{ github.event.inputs.ui }}",
+              "extra_packages": "",
+              "hostname": "s8plus-pmos",
+              "jobs": "2",
+              "ccache_size": "0",
+              "nonfree_firmware": "True",
+              "nonfree_userland": "False",
+              "build_pkgs_on_install": "False",
+              "ssh_keys": "False",
+              "timezone": "Asia/Ho_Chi_Minh",
+              "locale": "en_US.UTF-8",
+              "keymap": "",
+              "boot_size": "512",
+              "extra_space": "512",
+              "sudo_timer": "False",
+              "is_default_channel": "False",
+          }
+
+          for k, v in values.items():
+              cfg.set("pmbootstrap", k, v)
+
+          if not cfg.has_section("providers"):
+              cfg.add_section("providers")
+
+          with open(cfg_path, "w") as f:
+              cfg.write(f)
+
+          print(cfg_path.read_text())
+          PY
+
+      - name: Show pmbootstrap status and config
         run: |
           pmbootstrap status || true
           pmbootstrap config || true
+          cat "$HOME/.config/pmbootstrap.cfg"
 
       - name: Build Android recovery ZIP
         run: |
-          pmbootstrap --details-to-stdout install --android-recovery-zip
+          pmbootstrap --details-to-stdout install --android-recovery-zip --no-fde
 
       - name: Export files
         run: |
