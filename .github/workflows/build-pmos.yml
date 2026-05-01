@@ -72,7 +72,7 @@ jobs:
           pmbootstrap config timezone Asia/Ho_Chi_Minh
           pmbootstrap config jobs 2
           pmbootstrap config ccache_size 0
-          pmbootstrap config extra_packages "device-samsung-dream-nonfree-firmware postmarketos-mkinitfs-hook-debug-shell"
+          pmbootstrap config extra_packages device-samsung-dream-nonfree-firmware,postmarketos-mkinitfs-hook-debug-shell
           pmbootstrap config build_pkgs_on_install True || true
           pmbootstrap config ssh_keys False || true
 
