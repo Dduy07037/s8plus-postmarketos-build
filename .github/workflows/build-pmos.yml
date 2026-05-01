@@ -55,14 +55,13 @@ jobs:
             android-tools-adb \
             android-tools-fastboot
 
-      - name: Install pmbootstrap
+      - name: Install pmbootstrap from git
         run: |
-          python3 -m venv "$HOME/pmb-venv"
-          source "$HOME/pmb-venv/bin/activate"
-          pip install --upgrade pip
-          pip install pmbootstrap
-          echo "$HOME/pmb-venv/bin" >> "$GITHUB_PATH"
-          pmbootstrap --version
+          git clone --depth=1 https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git "$HOME/pmbootstrap"
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$HOME/pmbootstrap/pmbootstrap.py" "$HOME/.local/bin/pmbootstrap"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/pmbootstrap" --version
 
       - name: Initialize pmbootstrap for Samsung Galaxy S8 Plus
         shell: bash
