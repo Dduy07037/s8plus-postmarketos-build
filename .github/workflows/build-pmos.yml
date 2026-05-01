@@ -112,10 +112,26 @@ jobs:
             exit 1
           fi
 
-      - name: Force rebuild patched device package
+      - name: Update checksum and rebuild patched device package
+        shell: bash
         run: |
-          pmbootstrap --details-to-stdout build --force device-samsung-dream || true
-          pmbootstrap --details-to-stdout build device-samsung-dream || true
+          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
+
+          echo "Check patched deviceinfo:"
+          grep -Rni "deviceinfo_create_initfs_extra" "$PMAPORTS/device" | grep -i "samsung-dream" || true
+
+          echo "Bump pkgrel so pmbootstrap rebuilds the patched package:"
+          APKBUILD="$(find "$PMAPORTS/device" -path "*/device-samsung-dream/APKBUILD" -print -quit)"
+          echo "APKBUILD=$APKBUILD"
+          test -n "$APKBUILD"
+
+          sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
+
+          echo "Update APKBUILD checksums after patch:"
+          pmbootstrap --details-to-stdout checksum device-samsung-dream
+
+          echo "Build patched device package:"
+          pmbootstrap --details-to-stdout build --force device-samsung-dream
 
       - name: Show pmbootstrap status and config
         run: |
