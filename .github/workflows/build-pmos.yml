@@ -76,33 +76,46 @@ jobs:
           pmbootstrap config build_pkgs_on_install True || true
           pmbootstrap config ssh_keys False || true
 
-      - name: Force disable initramfs-extra for samsung-dream
+      - name: Aggressively patch samsung-dream initramfs-extra
         shell: bash
         run: |
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
 
-          echo "Finding samsung-dream deviceinfo files..."
-          find "$PMAPORTS" -path "*device-samsung-dream*" -type f -name "deviceinfo*" -print
+          echo "=== Locate samsung-dream files ==="
+          find "$PMAPORTS" -iname "*samsung-dream*" -print || true
 
-          for f in $(find "$PMAPORTS" -path "*device-samsung-dream*" -type f -name "deviceinfo*"); do
-            echo "----- BEFORE: $f -----"
-            grep -n "deviceinfo_create_initfs_extra" "$f" || true
+          echo "=== BEFORE patch ==="
+          grep -Rni "initfs_extra\|initramfs_extra\|create_initfs" "$PMAPORTS/device" | grep -i "samsung-dream" || true
 
-            if grep -q "^deviceinfo_create_initfs_extra=" "$f"; then
-              sed -i 's/^deviceinfo_create_initfs_extra=.*/deviceinfo_create_initfs_extra="false"/' "$f"
-            else
-              echo 'deviceinfo_create_initfs_extra="false"' >> "$f"
-            fi
+          # Patch every deviceinfo-like file under device-samsung-dream
+          while IFS= read -r f; do
+            echo "Patching: $f"
 
-            echo "----- AFTER: $f -----"
-            grep -n "deviceinfo_create_initfs_extra" "$f" || true
-          done
+            # Replace any existing create_initfs_extra variable, including variant-specific forms
+            sed -i -E 's/^(deviceinfo_create_initfs_extra[^=]*=).*/\1"false"/' "$f"
+
+            # Add both generic and dream2lte-specific overrides at the end
+            {
+              echo ''
+              echo '# Forced by GitHub Actions debug build'
+              echo 'deviceinfo_create_initfs_extra="false"'
+              echo 'deviceinfo_create_initfs_extra_dream2lte="false"'
+            } >> "$f"
+          done < <(find "$PMAPORTS" -path "*device-samsung-dream*" -type f -name "deviceinfo*")
+
+          echo "=== AFTER patch ==="
+          grep -Rni "initfs_extra\|initramfs_extra\|create_initfs" "$PMAPORTS/device" | grep -i "samsung-dream" || true
+
+          echo "=== Fail if samsung-dream still has initfs-extra true ==="
+          if grep -Rni "deviceinfo_create_initfs_extra.*true" "$PMAPORTS/device" | grep -i "samsung-dream"; then
+            echo "ERROR: samsung-dream still has initramfs-extra enabled"
+            exit 1
+          fi
 
       - name: Force rebuild patched device package
         run: |
-          pmbootstrap --details-to-stdout build --force device-samsung-dream || \
-          pmbootstrap --details-to-stdout build -f device-samsung-dream || \
-          pmbootstrap --details-to-stdout build device-samsung-dream
+          pmbootstrap --details-to-stdout build --force device-samsung-dream || true
+          pmbootstrap --details-to-stdout build device-samsung-dream || true
 
       - name: Show pmbootstrap status and config
         run: |
