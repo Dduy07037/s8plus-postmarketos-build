@@ -76,153 +76,38 @@ jobs:
           pmbootstrap config build_pkgs_on_install True || true
           pmbootstrap config ssh_keys False || true
 
-      - name: Patch postmarketos-initramfs loop mapping
+      - name: Patch samsung-dream sector size for UFS
         shell: bash
         run: |
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
-          INITRAMFS_DIR="$PMAPORTS/main/postmarketos-initramfs"
 
-          echo "=== Check initramfs dir ==="
-          ls -lah "$INITRAMFS_DIR" || true
+          DEVICEINFO="$(find "$PMAPORTS/device" -path "*/device-samsung-dream/deviceinfo" -print -quit)"
+          APKBUILD="$(find "$PMAPORTS/device" -path "*/device-samsung-dream/APKBUILD" -print -quit)"
 
-          echo "=== Search boot logic inside postmarketos-initramfs ==="
-          grep -Rni "boot partition not found\|Waiting for boot partition\|pmOS_boot\|pmOS_root" "$INITRAMFS_DIR" || true
+          echo "DEVICEINFO=$DEVICEINFO"
+          echo "APKBUILD=$APKBUILD"
 
-          python3 - <<'PY'
-          from pathlib import Path
+          test -n "$DEVICEINFO"
+          test -n "$APKBUILD"
 
-          root = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-initramfs"
+          echo "Before patch:"
+          grep -n "deviceinfo_rootfs_image_sector_size" "$DEVICEINFO" || true
 
-          snippet = r'''
-          # samsung-dream internal userdata partition workaround
-          # USERDATA is /dev/block/sda24.
-          # postmarketOS installer creates a nested partition table:
-          #   sda24p1: offset 2048 * 4096 = 8388608       -> pmOS_boot
-          #   sda24p2: offset 62464 * 4096 = 255852544    -> pmOS_root
-          # Kernel does not expose sda24p1/sda24p2 automatically, so map them.
-          echo "samsung-dream: trying internal pmOS loop mapping"
-
-          PMOS_DATA=""
-          for candidate in /dev/block/sda24 /dev/sda24 /dev/block/platform/*/sda24 /dev/block/platform/*/*/sda24; do
-              if [ -b "$candidate" ]; then
-                  PMOS_DATA="$candidate"
-                  break
-              fi
-          done
-
-          if [ -n "$PMOS_DATA" ]; then
-              echo "samsung-dream: found userdata block: $PMOS_DATA"
-
-              mkdir -p /dev/block 2>/dev/null || true
-
-              [ -b /dev/block/loop0 ] || mknod /dev/block/loop0 b 7 0 2>/dev/null || true
-              [ -b /dev/block/loop1 ] || mknod /dev/block/loop1 b 7 1 2>/dev/null || true
-              [ -b /dev/loop0 ] || mknod /dev/loop0 b 7 0 2>/dev/null || true
-              [ -b /dev/loop1 ] || mknod /dev/loop1 b 7 1 2>/dev/null || true
-
-              LOOP0="/dev/block/loop0"
-              LOOP1="/dev/block/loop1"
-
-              [ -b "$LOOP0" ] || LOOP0="/dev/loop0"
-              [ -b "$LOOP1" ] || LOOP1="/dev/loop1"
-
-              losetup -d "$LOOP0" 2>/dev/null || true
-              losetup -d "$LOOP1" 2>/dev/null || true
-
-              losetup -o 8388608 "$LOOP0" "$PMOS_DATA" 2>/dev/null || busybox losetup -o 8388608 "$LOOP0" "$PMOS_DATA" 2>/dev/null || true
-              losetup -o 255852544 "$LOOP1" "$PMOS_DATA" 2>/dev/null || busybox losetup -o 255852544 "$LOOP1" "$PMOS_DATA" 2>/dev/null || true
-
-              echo "samsung-dream: loop status:"
-              losetup -a 2>/dev/null || busybox losetup -a 2>/dev/null || true
-              blkid "$LOOP0" "$LOOP1" 2>/dev/null || true
+          if grep -q "^deviceinfo_rootfs_image_sector_size=" "$DEVICEINFO"; then
+            sed -i 's/^deviceinfo_rootfs_image_sector_size=.*/deviceinfo_rootfs_image_sector_size="4096"/' "$DEVICEINFO"
           else
-              echo "samsung-dream: userdata block sda24 not found"
+            echo 'deviceinfo_rootfs_image_sector_size="4096"' >> "$DEVICEINFO"
           fi
-          '''
 
-          candidates = []
-
-          for p in root.rglob("*"):
-              if not p.is_file():
-                  continue
-
-              # Không patch APKBUILD / Python / binary
-              if p.name == "APKBUILD":
-                  continue
-              if p.suffix in [".py", ".pyc", ".apk", ".gz", ".xz", ".bin"]:
-                  continue
-
-              try:
-                  text = p.read_text(errors="ignore")
-              except Exception:
-                  continue
-
-              if (
-                  "boot partition not found" in text
-                  or "Waiting for boot partition" in text
-                  or "pmOS_boot" in text
-                  or "pmOS_root" in text
-              ):
-                  candidates.append(p)
-
-          print("Candidates:")
-          for p in candidates:
-              print(p)
-
-          patched = False
-
-          for p in candidates:
-              text = p.read_text(errors="ignore")
-
-              if "samsung-dream internal userdata partition workaround" in text:
-                  print("Already patched:", p)
-                  patched = True
-                  continue
-
-              # Ưu tiên chèn trước logic chờ/tìm boot partition
-              markers = [
-                  "Waiting for boot partition",
-                  "boot partition not found",
-                  "pmOS_boot",
-                  "pmOS_root",
-              ]
-
-              for marker in markers:
-                  idx = text.find(marker)
-                  if idx == -1:
-                      continue
-
-                  line_start = text.rfind("\n", 0, idx)
-                  if line_start == -1:
-                      line_start = 0
-
-                  new_text = text[:line_start] + "\n" + snippet + "\n" + text[line_start:]
-                  p.write_text(new_text)
-                  print("PATCHED:", p)
-                  patched = True
-                  break
-
-          if not patched:
-              raise SystemExit("No postmarketos-initramfs file was patched")
-          PY
-
-          echo "=== Verify patch ==="
-          grep -Rni "samsung-dream internal userdata partition workaround\|losetup -o 8388608\|losetup -o 255852544" "$INITRAMFS_DIR" || true
-
-      - name: Update checksum and rebuild postmarketos-initramfs
-        shell: bash
-        run: |
-          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
-          APKBUILD="$PMAPORTS/main/postmarketos-initramfs/APKBUILD"
+          echo "After patch:"
+          grep -n "deviceinfo_rootfs_image_sector_size" "$DEVICEINFO"
 
           echo "Bump pkgrel:"
-          sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD" || true
+          sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
 
-          echo "Update checksum:"
-          pmbootstrap --details-to-stdout checksum postmarketos-initramfs
-
-          echo "Build patched postmarketos-initramfs:"
-          pmbootstrap --details-to-stdout build --force postmarketos-initramfs
+          echo "Update checksum and rebuild device package:"
+          pmbootstrap --details-to-stdout checksum device-samsung-dream
+          pmbootstrap --details-to-stdout build --force device-samsung-dream
 
       - name: Show pmbootstrap status and config
         run: |
