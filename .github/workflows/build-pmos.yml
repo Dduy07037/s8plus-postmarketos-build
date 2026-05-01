@@ -76,19 +76,22 @@ jobs:
           pmbootstrap config build_pkgs_on_install True || true
           pmbootstrap config ssh_keys False || true
 
-      - name: Patch postmarketOS initramfs loop mapping only
+      - name: Patch postmarketos-initramfs loop mapping
         shell: bash
         run: |
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
-          MKINITFS_DIR="$PMAPORTS/main/postmarketos-mkinitfs"
+          INITRAMFS_DIR="$PMAPORTS/main/postmarketos-initramfs"
 
-          echo "=== Search only inside postmarketos-mkinitfs ==="
-          grep -Rni "boot partition not found\|Waiting for boot partition\|pmOS_boot" "$MKINITFS_DIR" || true
+          echo "=== Check initramfs dir ==="
+          ls -lah "$INITRAMFS_DIR" || true
+
+          echo "=== Search boot logic inside postmarketos-initramfs ==="
+          grep -Rni "boot partition not found\|Waiting for boot partition\|pmOS_boot\|pmOS_root" "$INITRAMFS_DIR" || true
 
           python3 - <<'PY'
           from pathlib import Path
 
-          root = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-mkinitfs"
+          root = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-initramfs"
 
           snippet = r'''
           # samsung-dream internal userdata partition workaround
@@ -96,12 +99,11 @@ jobs:
           # postmarketOS installer creates a nested partition table:
           #   sda24p1: offset 2048 * 4096 = 8388608       -> pmOS_boot
           #   sda24p2: offset 62464 * 4096 = 255852544    -> pmOS_root
-          # The kernel/initramfs does not expose sda24p1/sda24p2 automatically,
-          # so create loop mappings before searching for pmOS_boot.
+          # Kernel does not expose sda24p1/sda24p2 automatically, so map them.
           echo "samsung-dream: trying internal pmOS loop mapping"
 
           PMOS_DATA=""
-          for candidate in /dev/block/sda24 /dev/sda24 /dev/block/platform/*/sda24; do
+          for candidate in /dev/block/sda24 /dev/sda24 /dev/block/platform/*/sda24 /dev/block/platform/*/*/sda24; do
               if [ -b "$candidate" ]; then
                   PMOS_DATA="$candidate"
                   break
@@ -144,10 +146,10 @@ jobs:
               if not p.is_file():
                   continue
 
-              # Do not patch Python files or APKBUILD directly
-              if p.suffix in [".py", ".pyc"]:
-                  continue
+              # Không patch APKBUILD / Python / binary
               if p.name == "APKBUILD":
+                  continue
+              if p.suffix in [".py", ".pyc", ".apk", ".gz", ".xz", ".bin"]:
                   continue
 
               try:
@@ -159,6 +161,7 @@ jobs:
                   "boot partition not found" in text
                   or "Waiting for boot partition" in text
                   or "pmOS_boot" in text
+                  or "pmOS_root" in text
               ):
                   candidates.append(p)
 
@@ -176,11 +179,12 @@ jobs:
                   patched = True
                   continue
 
-              # Insert before the waiting/search logic
+              # Ưu tiên chèn trước logic chờ/tìm boot partition
               markers = [
                   "Waiting for boot partition",
                   "boot partition not found",
                   "pmOS_boot",
+                  "pmOS_root",
               ]
 
               for marker in markers:
@@ -199,17 +203,26 @@ jobs:
                   break
 
           if not patched:
-              raise SystemExit("No mkinitfs shell/initramfs file was patched")
+              raise SystemExit("No postmarketos-initramfs file was patched")
           PY
 
           echo "=== Verify patch ==="
-          grep -Rni "samsung-dream internal userdata partition workaround\|losetup -o 8388608\|losetup -o 255852544" "$MKINITFS_DIR" || true
+          grep -Rni "samsung-dream internal userdata partition workaround\|losetup -o 8388608\|losetup -o 255852544" "$INITRAMFS_DIR" || true
 
-      - name: Update checksum and rebuild mkinitfs
+      - name: Update checksum and rebuild postmarketos-initramfs
         shell: bash
         run: |
-          pmbootstrap --details-to-stdout checksum postmarketos-mkinitfs
-          pmbootstrap --details-to-stdout build --force postmarketos-mkinitfs
+          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
+          APKBUILD="$PMAPORTS/main/postmarketos-initramfs/APKBUILD"
+
+          echo "Bump pkgrel:"
+          sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD" || true
+
+          echo "Update checksum:"
+          pmbootstrap --details-to-stdout checksum postmarketos-initramfs
+
+          echo "Build patched postmarketos-initramfs:"
+          pmbootstrap --details-to-stdout build --force postmarketos-initramfs
 
       - name: Show pmbootstrap status and config
         run: |
