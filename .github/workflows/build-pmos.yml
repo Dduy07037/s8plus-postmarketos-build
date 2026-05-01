@@ -76,57 +76,163 @@ jobs:
           pmbootstrap config build_pkgs_on_install True || true
           pmbootstrap config ssh_keys False || true
 
-      - name: Patch pmbootstrap single-partition guard
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          target = Path.home() / "pmbootstrap" / "pmb" / "install" / "_install.py"
-          print("Patching:", target)
-
-          text = target.read_text()
-
-          old = 'raise RuntimeError("--single-partition does not work for devices with initramfs-extra")'
-          new = 'print("WARNING: ignored initramfs-extra single-partition guard for samsung-dream debug build")'
-
-          if old not in text:
-              print("Old guard not found. Showing matching lines:")
-              for i, line in enumerate(text.splitlines(), 1):
-                  if "single-partition" in line or "initramfs-extra" in line:
-                      print(i, line)
-              raise SystemExit(1)
-
-          text = text.replace(old, new)
-          target.write_text(text)
-
-          print("Patch applied. Matching lines now:")
-          for i, line in enumerate(target.read_text().splitlines(), 1):
-              if "single-partition" in line or "initramfs-extra" in line:
-                  print(i, line)
-          PY
-
-      - name: Patch samsung-dream deviceinfo as best effort
+      - name: Patch initramfs to map internal pmOS partitions
         shell: bash
         run: |
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
 
-          echo "Finding samsung-dream deviceinfo files..."
-          find "$PMAPORTS" -path "*device-samsung-dream*" -type f -name "deviceinfo*" -print || true
+          echo "=== Search initramfs files ==="
+          grep -Rni "boot partition not found\|Waiting for boot partition\|pmOS_boot" "$PMAPORTS" "$HOME/pmbootstrap" | head -300 || true
 
-          while IFS= read -r f; do
-            echo "Patching: $f"
-            sed -i -E 's/^(deviceinfo_create_initfs_extra[^=]*=).*/\1"false"/' "$f" || true
-            {
-              echo ''
-              echo '# Forced by debug workflow'
-              echo 'deviceinfo_create_initfs_extra="false"'
-              echo 'deviceinfo_create_initfs_extra_dream2lte="false"'
-            } >> "$f"
-          done < <(find "$PMAPORTS" -path "*device-samsung-dream*" -type f -name "deviceinfo*")
+          python3 - <<'PY'
+          from pathlib import Path
 
-          echo "After patch:"
-          grep -Rni "deviceinfo_create_initfs_extra" "$PMAPORTS/device" | grep -i "samsung-dream" || true
+          search_roots = [
+              Path.home() / ".local/var/pmbootstrap/cache_git/pmaports",
+              Path.home() / "pmbootstrap",
+          ]
+
+          snippet = r'''
+          # samsung-dream internal userdata partition workaround
+          # USERDATA is /dev/block/sda24.
+          # postmarketOS recovery installer creates a nested partition table:
+          #   sda24p1 starts at 2048 sectors  * 4096 = 8388608 bytes      -> pmOS_boot
+          #   sda24p2 starts at 62464 sectors * 4096 = 255852544 bytes    -> pmOS_root
+          # This kernel/initramfs does not expose sda24p1/sda24p2 automatically,
+          # so we map them manually with loop devices before searching pmOS_boot.
+          if [ -b /dev/block/sda24 ]; then
+              echo "samsung-dream: mapping pmOS partitions from /dev/block/sda24"
+
+              mkdir -p /dev/block 2>/dev/null || true
+
+              if [ ! -b /dev/block/loop0 ]; then
+                  mknod /dev/block/loop0 b 7 0 2>/dev/null || true
+              fi
+              if [ ! -b /dev/block/loop1 ]; then
+                  mknod /dev/block/loop1 b 7 1 2>/dev/null || true
+              fi
+
+              LOOP0="/dev/block/loop0"
+              LOOP1="/dev/block/loop1"
+
+              if [ ! -b "$LOOP0" ] && [ -b /dev/loop0 ]; then
+                  LOOP0="/dev/loop0"
+              fi
+              if [ ! -b "$LOOP1" ] && [ -b /dev/loop1 ]; then
+                  LOOP1="/dev/loop1"
+              fi
+
+              losetup -d "$LOOP0" 2>/dev/null || true
+              losetup -d "$LOOP1" 2>/dev/null || true
+
+              losetup -o 8388608 "$LOOP0" /dev/block/sda24 2>/dev/null || busybox losetup -o 8388608 "$LOOP0" /dev/block/sda24 2>/dev/null || true
+              losetup -o 255852544 "$LOOP1" /dev/block/sda24 2>/dev/null || busybox losetup -o 255852544 "$LOOP1" /dev/block/sda24 2>/dev/null || true
+
+              echo "samsung-dream: mapped loop devices:"
+              losetup -a 2>/dev/null || busybox losetup -a 2>/dev/null || true
+              blkid "$LOOP0" "$LOOP1" 2>/dev/null || true
+          fi
+          '''
+
+          candidates = []
+
+          for root in search_roots:
+              if not root.exists():
+                  continue
+
+              for p in root.rglob("*"):
+                  if not p.is_file():
+                      continue
+
+                  try:
+                      text = p.read_text(errors="ignore")
+                  except Exception:
+                      continue
+
+                  if (
+                      "boot partition not found" in text
+                      or "Waiting for boot partition" in text
+                      or "pmOS_boot" in text
+                  ):
+                      candidates.append(p)
+
+          print("Candidates found:")
+          for p in candidates:
+              print(p)
+
+          patched_files = []
+
+          for p in candidates:
+              text = p.read_text(errors="ignore")
+
+              if "samsung-dream internal userdata partition workaround" in text:
+                  continue
+
+              markers = [
+                  "Waiting for boot partition",
+                  "boot partition not found",
+                  "pmOS_boot",
+              ]
+
+              patched = False
+
+              for marker in markers:
+                  idx = text.find(marker)
+                  if idx == -1:
+                      continue
+
+                  line_start = text.rfind("\n", 0, idx)
+                  if line_start == -1:
+                      line_start = 0
+
+                  new_text = text[:line_start] + "\n" + snippet + "\n" + text[line_start:]
+                  p.write_text(new_text)
+                  patched = True
+                  patched_files.append(p)
+                  print("PATCHED:", p)
+                  break
+
+          if not patched_files:
+              raise SystemExit("No initramfs/search file patched")
+
+          print("Patched files:")
+          for p in patched_files:
+              print(p)
+          PY
+
+          echo "=== Patch verification ==="
+          grep -Rni "samsung-dream internal userdata partition workaround\|losetup -o 8388608\|losetup -o 255852544" "$PMAPORTS" "$HOME/pmbootstrap" || true
+
+      - name: Update checksums and rebuild patched packages
+        shell: bash
+        run: |
+          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
+
+          echo "=== Find patched package directories ==="
+          grep -Rli "samsung-dream internal userdata partition workaround" "$PMAPORTS" "$HOME/pmbootstrap" || true
+
+          # Patch files in pmaports packages require checksum updates.
+          for patched in $(grep -Rli "samsung-dream internal userdata partition workaround" "$PMAPORTS" || true); do
+            dir="$(dirname "$patched")"
+
+            while [ "$dir" != "$PMAPORTS" ] && [ "$dir" != "/" ]; do
+              if [ -f "$dir/APKBUILD" ]; then
+                pkg="$(basename "$dir")"
+                echo "Package containing patch: $pkg"
+                sed -i 's/^pkgrel=.*/pkgrel=999/' "$dir/APKBUILD" || true
+                pmbootstrap --details-to-stdout checksum "$pkg" || true
+                pmbootstrap --details-to-stdout build --force "$pkg" || true
+                break
+              fi
+              dir="$(dirname "$dir")"
+            done
+          done
+
+          # These are the most likely initramfs-related packages.
+          pmbootstrap --details-to-stdout checksum postmarketos-mkinitfs || true
+          pmbootstrap --details-to-stdout build --force postmarketos-mkinitfs || true
+          pmbootstrap --details-to-stdout build --force postmarketos-initramfs || true
+          pmbootstrap --details-to-stdout build --force postmarketos-base || true
 
       - name: Show pmbootstrap status and config
         run: |
@@ -138,7 +244,6 @@ jobs:
           pmbootstrap --details-to-stdout install \
             --android-recovery-zip \
             --recovery-install-partition=data \
-            --single-partition \
             --no-fde \
             --password "123456"
 
