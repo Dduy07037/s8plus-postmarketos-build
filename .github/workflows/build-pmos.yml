@@ -76,6 +76,29 @@ jobs:
           pmbootstrap config providers iwd || true
           pmbootstrap config ssh_keys False || true
 
+      - name: Patch samsung-dream to disable initramfs-extra
+        shell: bash
+        run: |
+          PMB_WORK="$HOME/.local/var/pmbootstrap"
+          PMAPORTS="$PMB_WORK/cache_git/pmaports"
+
+          DEVICEINFO="$(find "$PMAPORTS" -path "*/device-samsung-dream/deviceinfo" -print -quit)"
+
+          echo "Deviceinfo path: $DEVICEINFO"
+          test -n "$DEVICEINFO"
+
+          echo "Before patch:"
+          grep -n "deviceinfo_create_initfs_extra\|deviceinfo_boot_filesystem\|deviceinfo_root_filesystem" "$DEVICEINFO" || true
+
+          if grep -q "^deviceinfo_create_initfs_extra=" "$DEVICEINFO"; then
+            sed -i 's/^deviceinfo_create_initfs_extra=.*/deviceinfo_create_initfs_extra="false"/' "$DEVICEINFO"
+          else
+            printf '\ndeviceinfo_create_initfs_extra="false"\n' >> "$DEVICEINFO"
+          fi
+
+          echo "After patch:"
+          grep -n "deviceinfo_create_initfs_extra" "$DEVICEINFO"
+
       - name: Show pmbootstrap status and config
         run: |
           pmbootstrap status || true
@@ -86,7 +109,6 @@ jobs:
           pmbootstrap --details-to-stdout install \
             --android-recovery-zip \
             --recovery-install-partition=data \
-            --single-partition \
             --password "123456"
 
       - name: Export files
