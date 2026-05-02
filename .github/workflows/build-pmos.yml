@@ -247,26 +247,29 @@ jobs:
           
                     echo "Bootlog hook package built successfully"
                     exit 0
-          
-                - name: Build Android recovery ZIP
-                  run: |
-                    pmbootstrap --details-to-stdout install \
-                      --android-recovery-zip \
-                      --recovery-install-partition=data \
-                      --no-fde \
-                      --password "123456"
-          
-                - name: Export files
-                  run: |
-                    mkdir -p out
-                    pmbootstrap export out
-                    find out -maxdepth 2 -type f -print
-                    ls -lh out
-          
-                - name: Upload postmarketOS artifact
-                  uses: actions/upload-artifact@v4
-                  with:
-                    name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}
-                    path: out/**
-                    if-no-files-found: error
-                    retention-days: 7
+
+
+      - name: Build Android recovery ZIP
+        run: |
+          pmbootstrap --details-to-stdout install \
+            --android-recovery-zip \
+            --recovery-install-partition=data \
+            --no-fde \
+            --password "123456"
+
+      - name: Export files
+        run: |
+          mkdir -p out
+          pmbootstrap export out
+          echo "=== exported files ==="
+          find out -maxdepth 3 -type f -print
+          echo "=== out directory ==="
+          ls -lah out
+
+      - name: Upload postmarketOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}
+          path: out/**
+          if-no-files-found: error
+          retention-days: 7
