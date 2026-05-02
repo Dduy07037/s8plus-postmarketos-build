@@ -126,7 +126,7 @@ jobs:
           pmbootstrap status || true
           pmbootstrap config || true
 
-      - name: Add safe initramfs boot log hook
+      - name: Add initramfs devblock compatibility hook
         shell: bash
         run: |
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
@@ -143,93 +143,57 @@ jobs:
           from pathlib import Path
 
           pkgdir = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-mkinitfs"
-          hook = pkgdir / "99-samsung-dream-safe-bootlog.sh"
+          hook = pkgdir / "98-samsung-dream-devblock.sh"
           apkbuild = pkgdir / "APKBUILD"
 
           hook.write_text("""#!/bin/sh
 
-          LOG="/tmp/pmos-safe-boot-debug.txt"
+          echo "samsung-dream: creating /dev/block compatibility links"
 
-          echo "=== samsung-dream SAFE initramfs bootlog start ===" > "$LOG"
-          date >> "$LOG" 2>&1 || true
+          # Some samsung-dream initramfs boots expose devices as /dev/loop0p1
+          # and /dev/loop0p2, but not under /dev/block. Create compatibility
+          # links without touching loop mappings.
+          if [ ! -d /dev/block ]; then
+              rm -f /dev/block 2>/dev/null || true
+              mkdir -p /dev/block 2>/dev/null || true
+          fi
 
-          echo "--- cmdline ---" >> "$LOG"
-          cat /proc/cmdline >> "$LOG" 2>&1 || true
+          mkdir -p /dev/block/by-label 2>/dev/null || true
 
-          echo "--- proc partitions ---" >> "$LOG"
-          cat /proc/partitions >> "$LOG" 2>&1 || true
-
-          echo "--- devices ---" >> "$LOG"
-          ls -lah /dev >> "$LOG" 2>&1 || true
-          ls -lah /dev/block >> "$LOG" 2>&1 || true
-          ls -lah /dev/loop* >> "$LOG" 2>&1 || true
-          ls -lah /dev/block/loop* >> "$LOG" 2>&1 || true
-          ls -lah /dev/sda* >> "$LOG" 2>&1 || true
-
-          echo "--- initial blkid ---" >> "$LOG"
-          blkid >> "$LOG" 2>&1 || true
-
-          echo "--- initial losetup ---" >> "$LOG"
-          losetup -a >> "$LOG" 2>&1 || true
-
-          echo "--- initial mount ---" >> "$LOG"
-          mount >> "$LOG" 2>&1 || true
-
-          echo "--- wait for existing pmOS_boot without remapping ---" >> "$LOG"
-
-          BOOTDEV=""
           i=0
           while [ "$i" -lt 20 ]; do
-              for dev in /dev/loop0p1 /dev/block/loop0p1 /dev/disk/by-label/pmOS_boot /dev/block/by-label/pmOS_boot; do
+              for dev in /dev/loop0 /dev/loop0p1 /dev/loop0p2 /dev/sda /dev/sda24; do
                   if [ -b "$dev" ]; then
-                      BOOTDEV="$dev"
-                      break
+                      name="${dev##*/}"
+                      ln -sf "$dev" "/dev/block/$name" 2>/dev/null || true
                   fi
               done
 
-              if [ -n "$BOOTDEV" ]; then
+              if [ -b /dev/loop0p1 ]; then
+                  ln -sf /dev/loop0p1 /dev/block/by-label/pmOS_boot 2>/dev/null || true
+              fi
+
+              if [ -b /dev/loop0p2 ]; then
+                  ln -sf /dev/loop0p2 /dev/block/by-label/pmOS_root 2>/dev/null || true
                   break
               fi
 
-              echo "wait $i: pmOS_boot not found yet" >> "$LOG"
-              blkid >> "$LOG" 2>&1 || true
               sleep 1
               i=$((i + 1))
           done
 
-          echo "--- selected BOOTDEV ---" >> "$LOG"
-          echo "$BOOTDEV" >> "$LOG"
-
-          echo "--- final blkid ---" >> "$LOG"
-          blkid >> "$LOG" 2>&1 || true
-
-          echo "--- final losetup ---" >> "$LOG"
-          losetup -a >> "$LOG" 2>&1 || true
-
-          echo "--- try copy log to pmOS_boot ---" >> "$LOG"
-
-          if [ -n "$BOOTDEV" ]; then
-              mkdir -p /mnt/pmosboot 2>/dev/null || true
-              mount "$BOOTDEV" /mnt/pmosboot >> "$LOG" 2>&1 || true
-
-              if [ -d /mnt/pmosboot ]; then
-                  cp "$LOG" /mnt/pmosboot/pmos-safe-boot-debug.txt 2>/dev/null || true
-                  sync
-              fi
-          fi
-
-          echo "=== samsung-dream SAFE initramfs bootlog end ===" >> "$LOG"
+          echo "samsung-dream: /dev/block compatibility ready"
           """)
 
           hook.chmod(0o755)
 
           text = apkbuild.read_text()
 
-          source_line = 'source="$source 99-samsung-dream-safe-bootlog.sh"'
-          install_line = '    install -Dm755 "$srcdir"/99-samsung-dream-safe-bootlog.sh "$pkgdir"/usr/share/mkinitfs/hooks/99-samsung-dream-safe-bootlog.sh'
+          source_line = 'source="$source 98-samsung-dream-devblock.sh"'
+          install_line = '    install -Dm755 "$srcdir"/98-samsung-dream-devblock.sh "$pkgdir"/usr/share/mkinitfs/hooks/98-samsung-dream-devblock.sh'
 
           if source_line not in text:
-              text += "\n# samsung-dream safe bootlog debug hook\n" + source_line + "\n"
+              text += "\n# samsung-dream /dev/block compatibility hook\n" + source_line + "\n"
 
           if install_line not in text:
               lines = text.splitlines()
@@ -259,7 +223,7 @@ jobs:
           sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
 
           echo "Show APKBUILD patch:"
-          grep -n "99-samsung-dream-safe-bootlog.sh\|pkgrel\|source=\|mkinitfs/hooks" "$APKBUILD" || true
+          grep -n "98-samsung-dream-devblock.sh\|pkgrel\|source=\|mkinitfs/hooks" "$APKBUILD" || true
 
           echo "Update checksum:"
           pmbootstrap --details-to-stdout checksum postmarketos-mkinitfs
