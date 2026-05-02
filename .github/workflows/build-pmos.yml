@@ -207,7 +207,7 @@ jobs:
           install_line = '    install -Dm755 "$srcdir"/99-samsung-dream-bootlog.sh "$pkgdir"/usr/share/mkinitfs/files/99-samsung-dream-bootlog.sh'
 
           if source_line not in text:
-              text += "\\n# samsung-dream bootlog debug hook\\n" + source_line + "\\n"
+              text += "\n# samsung-dream bootlog debug hook\n" + source_line + "\n"
 
           if install_line not in text:
               lines = text.splitlines()
@@ -228,7 +228,7 @@ jobs:
               if not inserted:
                   raise SystemExit("Could not patch package() function in APKBUILD")
 
-              text = "\\n".join(out) + "\\n"
+              text = "\n".join(out) + "\n"
 
           apkbuild.write_text(text)
           PY
