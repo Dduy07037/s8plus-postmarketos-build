@@ -245,6 +245,9 @@ jobs:
                     echo "Build patched postmarketos-mkinitfs:"
                     pmbootstrap --details-to-stdout build --force postmarketos-mkinitfs
           
+                    echo "Bootlog hook package built successfully"
+                    exit 0
+          
                 - name: Build Android recovery ZIP
                   run: |
                     pmbootstrap --details-to-stdout install \
