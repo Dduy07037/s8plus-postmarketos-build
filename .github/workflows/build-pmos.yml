@@ -126,6 +126,147 @@ jobs:
           pmbootstrap status || true
           pmbootstrap config || true
 
+      - name: Add safe initramfs boot log hook
+        shell: bash
+        run: |
+          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
+          PKGDIR="$PMAPORTS/main/postmarketos-mkinitfs"
+          APKBUILD="$PKGDIR/APKBUILD"
+
+          echo "PKGDIR=$PKGDIR"
+          echo "APKBUILD=$APKBUILD"
+
+          test -d "$PKGDIR"
+          test -f "$APKBUILD"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          pkgdir = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-mkinitfs"
+          hook = pkgdir / "99-samsung-dream-safe-bootlog.sh"
+          apkbuild = pkgdir / "APKBUILD"
+
+          hook.write_text("""#!/bin/sh
+
+          LOG="/tmp/pmos-safe-boot-debug.txt"
+
+          echo "=== samsung-dream SAFE initramfs bootlog start ===" > "$LOG"
+          date >> "$LOG" 2>&1 || true
+
+          echo "--- cmdline ---" >> "$LOG"
+          cat /proc/cmdline >> "$LOG" 2>&1 || true
+
+          echo "--- proc partitions ---" >> "$LOG"
+          cat /proc/partitions >> "$LOG" 2>&1 || true
+
+          echo "--- devices ---" >> "$LOG"
+          ls -lah /dev >> "$LOG" 2>&1 || true
+          ls -lah /dev/block >> "$LOG" 2>&1 || true
+          ls -lah /dev/loop* >> "$LOG" 2>&1 || true
+          ls -lah /dev/block/loop* >> "$LOG" 2>&1 || true
+          ls -lah /dev/sda* >> "$LOG" 2>&1 || true
+
+          echo "--- initial blkid ---" >> "$LOG"
+          blkid >> "$LOG" 2>&1 || true
+
+          echo "--- initial losetup ---" >> "$LOG"
+          losetup -a >> "$LOG" 2>&1 || true
+
+          echo "--- initial mount ---" >> "$LOG"
+          mount >> "$LOG" 2>&1 || true
+
+          echo "--- wait for existing pmOS_boot without remapping ---" >> "$LOG"
+
+          BOOTDEV=""
+          i=0
+          while [ "$i" -lt 20 ]; do
+              for dev in /dev/loop0p1 /dev/block/loop0p1 /dev/disk/by-label/pmOS_boot /dev/block/by-label/pmOS_boot; do
+                  if [ -b "$dev" ]; then
+                      BOOTDEV="$dev"
+                      break
+                  fi
+              done
+
+              if [ -n "$BOOTDEV" ]; then
+                  break
+              fi
+
+              echo "wait $i: pmOS_boot not found yet" >> "$LOG"
+              blkid >> "$LOG" 2>&1 || true
+              sleep 1
+              i=$((i + 1))
+          done
+
+          echo "--- selected BOOTDEV ---" >> "$LOG"
+          echo "$BOOTDEV" >> "$LOG"
+
+          echo "--- final blkid ---" >> "$LOG"
+          blkid >> "$LOG" 2>&1 || true
+
+          echo "--- final losetup ---" >> "$LOG"
+          losetup -a >> "$LOG" 2>&1 || true
+
+          echo "--- try copy log to pmOS_boot ---" >> "$LOG"
+
+          if [ -n "$BOOTDEV" ]; then
+              mkdir -p /mnt/pmosboot 2>/dev/null || true
+              mount "$BOOTDEV" /mnt/pmosboot >> "$LOG" 2>&1 || true
+
+              if [ -d /mnt/pmosboot ]; then
+                  cp "$LOG" /mnt/pmosboot/pmos-safe-boot-debug.txt 2>/dev/null || true
+                  sync
+              fi
+          fi
+
+          echo "=== samsung-dream SAFE initramfs bootlog end ===" >> "$LOG"
+          """)
+
+          hook.chmod(0o755)
+
+          text = apkbuild.read_text()
+
+          source_line = 'source="$source 99-samsung-dream-safe-bootlog.sh"'
+          install_line = '    install -Dm755 "$srcdir"/99-samsung-dream-safe-bootlog.sh "$pkgdir"/usr/share/mkinitfs/hooks/99-samsung-dream-safe-bootlog.sh'
+
+          if source_line not in text:
+              text += "\n# samsung-dream safe bootlog debug hook\n" + source_line + "\n"
+
+          if install_line not in text:
+              lines = text.splitlines()
+              out = []
+              in_package = False
+              inserted = False
+
+              for line in lines:
+                  if line.startswith("package()"):
+                      in_package = True
+
+                  if in_package and line.strip() == "}" and not inserted:
+                      out.append(install_line)
+                      inserted = True
+
+                  out.append(line)
+
+              if not inserted:
+                  raise SystemExit("Could not patch package() function in APKBUILD")
+
+              text = "\n".join(out) + "\n"
+
+          apkbuild.write_text(text)
+          PY
+
+          echo "Bump pkgrel:"
+          sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
+
+          echo "Show APKBUILD patch:"
+          grep -n "99-samsung-dream-safe-bootlog.sh\|pkgrel\|source=\|mkinitfs/hooks" "$APKBUILD" || true
+
+          echo "Update checksum:"
+          pmbootstrap --details-to-stdout checksum postmarketos-mkinitfs
+
+          echo "Build patched postmarketos-mkinitfs:"
+          pmbootstrap --details-to-stdout build --force postmarketos-mkinitfs
+
       - name: Build Android recovery ZIP
         run: |
           pmbootstrap --details-to-stdout install \
