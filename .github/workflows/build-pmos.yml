@@ -109,7 +109,7 @@ jobs:
             echo 'deviceinfo_rootfs_image_sector_size="4096"' >> "$DEVICEINFO"
           fi
 
-          printf '%s\n' '' '# Forced debug build for boot diagnosis' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} pmos.debug-shell PMOS_NO_OUTPUT_REDIRECT loglevel=7"' >> "$DEVICEINFO"
+          printf '%s\n' '' '# Forced debug build for boot diagnosis' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} pmos.debug-shell PMOS_NO_OUTPUT_REDIRECT loglevel=7 rootwait root=/dev/loop0p2 pmos_root=/dev/loop0p2 rootfstype=ext4"' >> "$DEVICEINFO"
 
           echo "After patch:"
           grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline" "$DEVICEINFO" || true
@@ -126,110 +126,287 @@ jobs:
           pmbootstrap status || true
           pmbootstrap config || true
 
-      - name: Add initramfs devblock compatibility hook
+      - name: Patch postmarketos-initramfs root handoff for samsung-dream
         shell: bash
         run: |
+          set -euxo pipefail
+
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
-          PKGDIR="$PMAPORTS/main/postmarketos-mkinitfs"
+          PKGDIR="$PMAPORTS/main/postmarketos-initramfs"
+          INIT="$PKGDIR/init.sh"
+          FUN="$PKGDIR/init_functions.sh"
           APKBUILD="$PKGDIR/APKBUILD"
 
           echo "PKGDIR=$PKGDIR"
+          echo "INIT=$INIT"
+          echo "FUN=$FUN"
           echo "APKBUILD=$APKBUILD"
 
           test -d "$PKGDIR"
+          test -f "$INIT"
+          test -f "$FUN"
           test -f "$APKBUILD"
 
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          pkgdir = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-mkinitfs"
-          hook = pkgdir / "98-samsung-dream-devblock.sh"
-          apkbuild = pkgdir / "APKBUILD"
+          pkgdir = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-initramfs"
+          init = pkgdir / "init.sh"
+          fun = pkgdir / "init_functions.sh"
 
-          hook.write_text("""#!/bin/sh
+          text = fun.read_text()
 
-          echo "samsung-dream: creating /dev/block compatibility links"
+          def rename_function(src: str, name: str, required: bool = True) -> str:
+              """
+              Rename:
+                  name() {
+              to:
+                  name_orig() {
+              so we can override the function later.
+              """
+              if f"{name}_orig()" in src:
+                  return src
 
-          # Some samsung-dream initramfs boots expose devices as /dev/loop0p1
-          # and /dev/loop0p2, but not under /dev/block. Create compatibility
-          # links without touching loop mappings.
-          if [ ! -d /dev/block ]; then
-              rm -f /dev/block 2>/dev/null || true
-              mkdir -p /dev/block 2>/dev/null || true
-          fi
+              pattern = rf'(?m)^{re.escape(name)}\s*\(\)\s*\{{'
+              if not re.search(pattern, src):
+                  if required:
+                      raise SystemExit(f"Required function not found in init_functions.sh: {name}()")
+                  return src
 
-          mkdir -p /dev/block/by-label 2>/dev/null || true
+              return re.sub(pattern, f"{name}_orig() {{", src, count=1)
 
-          i=0
-          while [ "$i" -lt 20 ]; do
-              for dev in /dev/loop0 /dev/loop0p1 /dev/loop0p2 /dev/sda /dev/sda24; do
-                  if [ -b "$dev" ]; then
-                      name="${dev##*/}"
-                      ln -sf "$dev" "/dev/block/$name" 2>/dev/null || true
-                  fi
+          text = rename_function(text, "find_root_partition", required=True)
+          text = rename_function(text, "resize_root_partition", required=True)
+          text = rename_function(text, "mount_root_partition", required=True)
+
+          marker = "# samsung-dream force root handoff patch"
+          if marker not in text:
+              text += r'''
+
+          # samsung-dream force root handoff patch
+          # This is for Galaxy S8/S8+ recovery-zip install to Android userdata.
+          # In this layout initramfs exposes:
+          #   /dev/loop0p1 = pmOS_boot
+          #   /dev/loop0p2 = pmOS_root
+          #
+          # The stock logic may find boot but still fail before switch_root.
+          # We force the root device when it is clearly present and labelled pmOS_root.
+
+          _samsung_dream_log() {
+              msg="[samsung-dream-force] $*"
+              echo "$msg"
+              echo "$msg" >> /tmp/samsung-dream-root-handoff.log 2>/dev/null || true
+          }
+
+          _samsung_dream_save_log_to_boot() {
+              if grep -q " /boot " /proc/mounts 2>/dev/null; then
+                  mount -o remount,rw /boot 2>/dev/null || true
+
+                  {
+                      echo
+                      echo "===== samsung-dream root handoff debug ====="
+                      date 2>/dev/null || true
+                      echo "--- cmdline ---"
+                      cat /proc/cmdline 2>/dev/null || true
+                      echo "--- partitions ---"
+                      cat /proc/partitions 2>/dev/null || true
+                      echo "--- blkid ---"
+                      blkid 2>/dev/null || true
+                      echo "--- losetup ---"
+                      losetup -a 2>/dev/null || true
+                      echo "--- mounts ---"
+                      cat /proc/mounts 2>/dev/null || true
+                      echo "--- root candidate ---"
+                      _samsung_dream_root_candidate 2>/dev/null || true
+                      echo "--- /sysroot listing ---"
+                      ls -lah /sysroot 2>/dev/null || true
+                      echo "--- temp log ---"
+                      cat /tmp/samsung-dream-root-handoff.log 2>/dev/null || true
+                  } >> /boot/pmos-root-handoff-debug.txt 2>&1 || true
+
+                  sync 2>/dev/null || true
+                  mount -o remount,ro /boot 2>/dev/null || true
+              fi
+          }
+
+          _samsung_dream_fail() {
+              _samsung_dream_log "FATAL: $*"
+              _samsung_dream_save_log_to_boot
+
+              if command -v fail_to_boot >/dev/null 2>&1; then
+                  fail_to_boot "$*"
+              fi
+
+              echo "samsung-dream-force: boot stopped: $*"
+              while true; do
+                  sleep 60
+              done
+          }
+
+          _samsung_dream_root_candidate() {
+              i=0
+              while [ "$i" -lt 30 ]; do
+                  for dev in \
+                      /dev/loop0p2 \
+                      /dev/disk/by-label/pmOS_root \
+                      /dev/block/by-label/pmOS_root \
+                      /dev/mapper/userdata2 \
+                      /dev/dm-1
+                  do
+                      [ -b "$dev" ] || continue
+
+                      if blkid "$dev" 2>/dev/null | grep -q 'LABEL="pmOS_root"'; then
+                          echo "$dev"
+                          return 0
+                      fi
+                  done
+
+                  sleep 1
+                  i=$((i + 1))
               done
 
-              if [ -b /dev/loop0p1 ]; then
-                  ln -sf /dev/loop0p1 /dev/block/by-label/pmOS_boot 2>/dev/null || true
+              return 1
+          }
+
+          find_root_partition() {
+              forced_root="$(_samsung_dream_root_candidate 2>/dev/null || true)"
+
+              if [ -n "$forced_root" ]; then
+                  _samsung_dream_log "forced find_root_partition=$forced_root"
+                  echo "$forced_root"
+                  return 0
               fi
 
-              if [ -b /dev/loop0p2 ]; then
-                  ln -sf /dev/loop0p2 /dev/block/by-label/pmOS_root 2>/dev/null || true
-                  break
-              fi
+              _samsung_dream_log "forced root candidate not found; falling back to original find_root_partition"
+              find_root_partition_orig "$@"
+          }
 
-              sleep 1
-              i=$((i + 1))
-          done
+          resize_root_partition() {
+              rootpart="$(find_root_partition 2>/dev/null || true)"
 
-          echo "samsung-dream: /dev/block compatibility ready"
-          """)
+              case "$rootpart" in
+                  /dev/loop0p2|/dev/disk/by-label/pmOS_root|/dev/block/by-label/pmOS_root|/dev/mapper/userdata2|/dev/dm-1)
+                      _samsung_dream_log "skip resize_root_partition for nested userdata root: $rootpart"
+                      return 0
+                      ;;
+              esac
 
-          hook.chmod(0o755)
+              resize_root_partition_orig "$@"
+          }
 
-          text = apkbuild.read_text()
+          mount_root_partition() {
+              rootpart="$(find_root_partition 2>/dev/null || true)"
 
-          source_line = 'source="$source 98-samsung-dream-devblock.sh"'
-          install_line = '    install -Dm755 "$srcdir"/98-samsung-dream-devblock.sh "$pkgdir"/usr/share/mkinitfs/hooks/98-samsung-dream-devblock.sh'
+              case "$rootpart" in
+                  /dev/loop0p2|/dev/disk/by-label/pmOS_root|/dev/block/by-label/pmOS_root|/dev/mapper/userdata2|/dev/dm-1)
+                      _samsung_dream_log "force mount root partition: $rootpart -> /sysroot"
 
-          if source_line not in text:
-              text += "\n# samsung-dream /dev/block compatibility hook\n" + source_line + "\n"
+                      mkdir -p /sysroot 2>/dev/null || true
 
-          if install_line not in text:
-              lines = text.splitlines()
+                      if grep -q " /sysroot " /proc/mounts 2>/dev/null; then
+                          _samsung_dream_log "/sysroot already mounted, unmounting first"
+                          umount /sysroot 2>/dev/null || true
+                      fi
+
+                      _samsung_dream_log "blkid root: $(blkid "$rootpart" 2>/dev/null || true)"
+
+                      mount -t ext4 -o rw "$rootpart" /sysroot 2>/tmp/samsung-dream-mount.err || \
+                      mount -t ext4 -o ro "$rootpart" /sysroot 2>>/tmp/samsung-dream-mount.err || {
+                          _samsung_dream_log "mount failed for $rootpart"
+                          cat /tmp/samsung-dream-mount.err >> /tmp/samsung-dream-root-handoff.log 2>/dev/null || true
+                          _samsung_dream_fail "unable to force mount pmOS_root from $rootpart"
+                      }
+
+                      _samsung_dream_log "mount root OK"
+
+                      if [ ! -e /sysroot/sbin/init ] && [ ! -e /sysroot/lib/systemd/systemd ]; then
+                          _samsung_dream_log "root mounted but init not found"
+                          ls -lah /sysroot >> /tmp/samsung-dream-root-handoff.log 2>&1 || true
+                          _samsung_dream_fail "root mounted but /sbin/init or systemd not found"
+                      fi
+
+                      {
+                          echo "samsung-dream-force: mounted root in initramfs"
+                          date 2>/dev/null || true
+                          echo "rootpart=$rootpart"
+                          echo "--- blkid ---"
+                          blkid 2>/dev/null || true
+                          echo "--- mounts ---"
+                          cat /proc/mounts 2>/dev/null || true
+                          echo "--- /sysroot ---"
+                          ls -lah /sysroot 2>/dev/null || true
+                          echo "--- /sysroot/sbin/init ---"
+                          ls -lah /sysroot/sbin/init 2>/dev/null || true
+                          echo "--- /sysroot/lib/systemd/systemd ---"
+                          ls -lah /sysroot/lib/systemd/systemd 2>/dev/null || true
+                      } >> /sysroot/var/log/pmos-initramfs-mounted-root.txt 2>&1 || true
+
+                      sync 2>/dev/null || true
+                      _samsung_dream_save_log_to_boot
+                      return 0
+                      ;;
+              esac
+
+              _samsung_dream_log "using original mount_root_partition for rootpart=$rootpart"
+              mount_root_partition_orig "$@"
+          }
+
+          '''
+          fun.write_text(text)
+
+          init_text = init.read_text()
+
+          if "samsung-dream-before-switch-root" not in init_text:
+              lines = init_text.splitlines()
               out = []
-              in_package = False
               inserted = False
 
               for line in lines:
-                  if line.startswith("package()"):
-                      in_package = True
-
-                  if in_package and line.strip() == "}" and not inserted:
-                      out.append(install_line)
+                  if (not inserted) and ("switch_root" in line) and ("exec" in line):
+                      out.append('echo "samsung-dream-before-switch-root" >> /sysroot/var/log/pmos-initramfs-before-switch.txt 2>/dev/null || true')
+                      out.append('{')
+                      out.append('  echo "===== before switch_root ====="')
+                      out.append('  date 2>/dev/null || true')
+                      out.append('  echo "--- cmdline ---"')
+                      out.append('  cat /proc/cmdline 2>/dev/null || true')
+                      out.append('  echo "--- blkid ---"')
+                      out.append('  blkid 2>/dev/null || true')
+                      out.append('  echo "--- losetup ---"')
+                      out.append('  losetup -a 2>/dev/null || true')
+                      out.append('  echo "--- mounts ---"')
+                      out.append('  cat /proc/mounts 2>/dev/null || true')
+                      out.append('  echo "--- /sysroot ---"')
+                      out.append('  ls -lah /sysroot 2>/dev/null || true')
+                      out.append('  echo "--- init candidates ---"')
+                      out.append('  ls -lah /sysroot/sbin/init /sysroot/lib/systemd/systemd 2>/dev/null || true')
+                      out.append('} >> /sysroot/var/log/pmos-initramfs-before-switch.txt 2>&1 || true')
+                      out.append('sync 2>/dev/null || true')
                       inserted = True
 
                   out.append(line)
 
               if not inserted:
-                  raise SystemExit("Could not patch package() function in APKBUILD")
+                  raise SystemExit("Could not find exec switch_root line in init.sh")
 
-              text = "\n".join(out) + "\n"
+              init.write_text("\n".join(out) + "\n")
 
-          apkbuild.write_text(text)
           PY
+
+          echo "Show patched initramfs functions:"
+          grep -n "samsung-dream-force\|find_root_partition_orig\|resize_root_partition_orig\|mount_root_partition_orig" "$FUN" || true
+
+          echo "Show patched switch_root marker:"
+          grep -n "samsung-dream-before-switch-root\|switch_root" "$INIT" || true
 
           echo "Bump pkgrel:"
           sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
 
-          echo "Show APKBUILD patch:"
-          grep -n "98-samsung-dream-devblock.sh\|pkgrel\|source=\|mkinitfs/hooks" "$APKBUILD" || true
-
           echo "Update checksum:"
-          pmbootstrap --details-to-stdout checksum postmarketos-mkinitfs
+          pmbootstrap --details-to-stdout checksum postmarketos-initramfs
 
-          echo "Build patched postmarketos-mkinitfs:"
-          pmbootstrap --details-to-stdout build --force postmarketos-mkinitfs
+          echo "Build patched postmarketos-initramfs:"
+          pmbootstrap --details-to-stdout build --force postmarketos-initramfs
 
       - name: Build Android recovery ZIP
         run: |
