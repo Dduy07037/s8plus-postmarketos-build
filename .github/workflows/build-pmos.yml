@@ -32,8 +32,18 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y \
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+          sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+          sudo apt-get update \
+            -o Acquire::Retries=5 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30
+
+          sudo apt-get install -y --no-install-recommends \
             git \
             curl \
             wget \
@@ -121,29 +131,41 @@ jobs:
         run: |
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
           PKGDIR="$PMAPORTS/main/postmarketos-mkinitfs"
+          APKBUILD="$PKGDIR/APKBUILD"
 
           echo "PKGDIR=$PKGDIR"
-          ls -lah "$PKGDIR"
+          echo "APKBUILD=$APKBUILD"
 
-          mkdir -p "$PKGDIR/files"
-          cat > "$PKGDIR/files/99-samsung-dream-bootlog.sh" <<'EOF'
-          #!/bin/sh
+          test -d "$PKGDIR"
+          test -f "$APKBUILD"
 
-          echo "=== samsung-dream initramfs bootlog start ===" > /tmp/pmos-boot-debug.txt
-          date >> /tmp/pmos-boot-debug.txt 2>&1 || true
+          python3 - <<'PY'
+          from pathlib import Path
 
-          echo "--- cmdline ---" >> /tmp/pmos-boot-debug.txt
-          cat /proc/cmdline >> /tmp/pmos-boot-debug.txt 2>&1 || true
+          pkgdir = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-mkinitfs"
+          hook = pkgdir / "99-samsung-dream-bootlog.sh"
+          apkbuild = pkgdir / "APKBUILD"
 
-          echo "--- block devices before loop ---" >> /tmp/pmos-boot-debug.txt
-          ls -lah /dev/block >> /tmp/pmos-boot-debug.txt 2>&1 || true
-          blkid >> /tmp/pmos-boot-debug.txt 2>&1 || true
+          hook.write_text("""#!/bin/sh
+
+          LOG="/tmp/pmos-boot-debug.txt"
+
+          echo "=== samsung-dream initramfs bootlog start ===" > "$LOG"
+          date >> "$LOG" 2>&1 || true
+
+          echo "--- cmdline ---" >> "$LOG"
+          cat /proc/cmdline >> "$LOG" 2>&1 || true
+
+          echo "--- block devices before loop ---" >> "$LOG"
+          ls -lah /dev/block >> "$LOG" 2>&1 || true
+          blkid >> "$LOG" 2>&1 || true
 
           mkdir -p /dev/block 2>/dev/null || true
           [ -b /dev/block/loop0 ] || mknod /dev/block/loop0 b 7 0 2>/dev/null || true
           [ -b /dev/block/loop1 ] || mknod /dev/block/loop1 b 7 1 2>/dev/null || true
 
           PMOS_DATA=""
+
           for candidate in /dev/block/sda24 /dev/sda24 /dev/block/platform/*/sda24 /dev/block/platform/*/*/sda24; do
               if [ -b "$candidate" ]; then
                   PMOS_DATA="$candidate"
@@ -151,8 +173,8 @@ jobs:
               fi
           done
 
-          echo "--- userdata candidate ---" >> /tmp/pmos-boot-debug.txt
-          echo "$PMOS_DATA" >> /tmp/pmos-boot-debug.txt
+          echo "--- userdata candidate ---" >> "$LOG"
+          echo "$PMOS_DATA" >> "$LOG"
 
           if [ -n "$PMOS_DATA" ]; then
               losetup -d /dev/block/loop0 2>/dev/null || true
@@ -161,37 +183,66 @@ jobs:
               losetup -o 255852544 /dev/block/loop1 "$PMOS_DATA" 2>/dev/null || true
           fi
 
-          echo "--- loop status ---" >> /tmp/pmos-boot-debug.txt
-          losetup -a >> /tmp/pmos-boot-debug.txt 2>&1 || true
-          blkid /dev/block/loop0 /dev/block/loop1 >> /tmp/pmos-boot-debug.txt 2>&1 || true
+          echo "--- loop status ---" >> "$LOG"
+          losetup -a >> "$LOG" 2>&1 || true
+          blkid /dev/block/loop0 /dev/block/loop1 >> "$LOG" 2>&1 || true
 
-          echo "--- mount attempt pmOS_boot ---" >> /tmp/pmos-boot-debug.txt
+          echo "--- mount attempt pmOS_boot ---" >> "$LOG"
           mkdir -p /mnt/pmosboot 2>/dev/null || true
-          mount /dev/block/loop0 /mnt/pmosboot >> /tmp/pmos-boot-debug.txt 2>&1 || true
+          mount /dev/block/loop0 /mnt/pmosboot >> "$LOG" 2>&1 || true
+
+          echo "=== samsung-dream initramfs bootlog end ===" >> "$LOG"
 
           if [ -d /mnt/pmosboot ]; then
-              cp /tmp/pmos-boot-debug.txt /mnt/pmosboot/pmos-boot-debug.txt 2>/dev/null || true
+              cp "$LOG" /mnt/pmosboot/pmos-boot-debug.txt 2>/dev/null || true
               sync
           fi
+          """)
 
-          echo "=== samsung-dream initramfs bootlog end ===" >> /tmp/pmos-boot-debug.txt
-          EOF
+          hook.chmod(0o755)
 
-          chmod +x "$PKGDIR/files/99-samsung-dream-bootlog.sh"
+          text = apkbuild.read_text()
 
-          echo "Patch APKBUILD to install bootlog hook"
-          APKBUILD="$PKGDIR/APKBUILD"
+          source_line = 'source="$source 99-samsung-dream-bootlog.sh"'
+          install_line = '    install -Dm755 "$srcdir"/99-samsung-dream-bootlog.sh "$pkgdir"/usr/share/mkinitfs/files/99-samsung-dream-bootlog.sh'
 
-          if ! grep -q "99-samsung-dream-bootlog.sh" "$APKBUILD"; then
-            sed -i '/package()/,/}/ s|}|    install -Dm755 "$srcdir"/99-samsung-dream-bootlog.sh "$pkgdir"/usr/share/mkinitfs/files/99-samsung-dream-bootlog.sh\n}|' "$APKBUILD"
-          fi
+          if source_line not in text:
+              text += "\\n# samsung-dream bootlog debug hook\\n" + source_line + "\\n"
 
+          if install_line not in text:
+              lines = text.splitlines()
+              out = []
+              in_package = False
+              inserted = False
+
+              for line in lines:
+                  if line.startswith("package()"):
+                      in_package = True
+
+                  if in_package and line.strip() == "}" and not inserted:
+                      out.append(install_line)
+                      inserted = True
+
+                  out.append(line)
+
+              if not inserted:
+                  raise SystemExit("Could not patch package() function in APKBUILD")
+
+              text = "\\n".join(out) + "\\n"
+
+          apkbuild.write_text(text)
+          PY
+
+          echo "Bump pkgrel:"
           sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
 
           echo "Show APKBUILD patch:"
-          grep -n "99-samsung-dream-bootlog.sh\|pkgrel" "$APKBUILD" || true
+          grep -n "99-samsung-dream-bootlog.sh\|pkgrel\|source=" "$APKBUILD" || true
 
+          echo "Update checksum:"
           pmbootstrap --details-to-stdout checksum postmarketos-mkinitfs
+
+          echo "Build patched postmarketos-mkinitfs:"
           pmbootstrap --details-to-stdout build --force postmarketos-mkinitfs
 
       - name: Build Android recovery ZIP
