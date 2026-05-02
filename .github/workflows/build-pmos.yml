@@ -116,6 +116,84 @@ jobs:
           pmbootstrap status || true
           pmbootstrap config || true
 
+      - name: Add initramfs boot log hook
+        shell: bash
+        run: |
+          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
+          PKGDIR="$PMAPORTS/main/postmarketos-mkinitfs"
+
+          echo "PKGDIR=$PKGDIR"
+          ls -lah "$PKGDIR"
+
+          mkdir -p "$PKGDIR/files"
+          cat > "$PKGDIR/files/99-samsung-dream-bootlog.sh" <<'EOF'
+          #!/bin/sh
+
+          echo "=== samsung-dream initramfs bootlog start ===" > /tmp/pmos-boot-debug.txt
+          date >> /tmp/pmos-boot-debug.txt 2>&1 || true
+
+          echo "--- cmdline ---" >> /tmp/pmos-boot-debug.txt
+          cat /proc/cmdline >> /tmp/pmos-boot-debug.txt 2>&1 || true
+
+          echo "--- block devices before loop ---" >> /tmp/pmos-boot-debug.txt
+          ls -lah /dev/block >> /tmp/pmos-boot-debug.txt 2>&1 || true
+          blkid >> /tmp/pmos-boot-debug.txt 2>&1 || true
+
+          mkdir -p /dev/block 2>/dev/null || true
+          [ -b /dev/block/loop0 ] || mknod /dev/block/loop0 b 7 0 2>/dev/null || true
+          [ -b /dev/block/loop1 ] || mknod /dev/block/loop1 b 7 1 2>/dev/null || true
+
+          PMOS_DATA=""
+          for candidate in /dev/block/sda24 /dev/sda24 /dev/block/platform/*/sda24 /dev/block/platform/*/*/sda24; do
+              if [ -b "$candidate" ]; then
+                  PMOS_DATA="$candidate"
+                  break
+              fi
+          done
+
+          echo "--- userdata candidate ---" >> /tmp/pmos-boot-debug.txt
+          echo "$PMOS_DATA" >> /tmp/pmos-boot-debug.txt
+
+          if [ -n "$PMOS_DATA" ]; then
+              losetup -d /dev/block/loop0 2>/dev/null || true
+              losetup -d /dev/block/loop1 2>/dev/null || true
+              losetup -o 8388608 /dev/block/loop0 "$PMOS_DATA" 2>/dev/null || true
+              losetup -o 255852544 /dev/block/loop1 "$PMOS_DATA" 2>/dev/null || true
+          fi
+
+          echo "--- loop status ---" >> /tmp/pmos-boot-debug.txt
+          losetup -a >> /tmp/pmos-boot-debug.txt 2>&1 || true
+          blkid /dev/block/loop0 /dev/block/loop1 >> /tmp/pmos-boot-debug.txt 2>&1 || true
+
+          echo "--- mount attempt pmOS_boot ---" >> /tmp/pmos-boot-debug.txt
+          mkdir -p /mnt/pmosboot 2>/dev/null || true
+          mount /dev/block/loop0 /mnt/pmosboot >> /tmp/pmos-boot-debug.txt 2>&1 || true
+
+          if [ -d /mnt/pmosboot ]; then
+              cp /tmp/pmos-boot-debug.txt /mnt/pmosboot/pmos-boot-debug.txt 2>/dev/null || true
+              sync
+          fi
+
+          echo "=== samsung-dream initramfs bootlog end ===" >> /tmp/pmos-boot-debug.txt
+          EOF
+
+          chmod +x "$PKGDIR/files/99-samsung-dream-bootlog.sh"
+
+          echo "Patch APKBUILD to install bootlog hook"
+          APKBUILD="$PKGDIR/APKBUILD"
+
+          if ! grep -q "99-samsung-dream-bootlog.sh" "$APKBUILD"; then
+            sed -i '/package()/,/}/ s|}|    install -Dm755 "$srcdir"/99-samsung-dream-bootlog.sh "$pkgdir"/usr/share/mkinitfs/files/99-samsung-dream-bootlog.sh\n}|' "$APKBUILD"
+          fi
+
+          sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
+
+          echo "Show APKBUILD patch:"
+          grep -n "99-samsung-dream-bootlog.sh\|pkgrel" "$APKBUILD" || true
+
+          pmbootstrap --details-to-stdout checksum postmarketos-mkinitfs
+          pmbootstrap --details-to-stdout build --force postmarketos-mkinitfs
+
       - name: Build Android recovery ZIP
         run: |
           pmbootstrap --details-to-stdout install \
