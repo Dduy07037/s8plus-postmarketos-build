@@ -1,0 +1,137 @@
+name: Build postmarketOS raw image for S8 Plus
+
+on:
+  workflow_dispatch:
+    inputs:
+      ui:
+        description: "UI"
+        required: true
+        default: "console"
+        type: choice
+        options:
+          - console
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 openssl gzip xz-utils file
+
+      - name: Install pmbootstrap
+        run: |
+          git clone --depth=1 https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$PWD/pmbootstrap/pmbootstrap.py" "$HOME/.local/bin/pmbootstrap"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Init pmbootstrap
+        run: |
+          pmbootstrap --details-to-stdout init \
+            --aports=https://gitlab.postmarketos.org/postmarketOS/pmaports.git \
+            --device=samsung-dream \
+            --kernel=dream2lte \
+            --ui="${{ github.event.inputs.ui }}"
+
+      - name: Configure target
+        run: |
+          pmbootstrap config device samsung-dream
+          pmbootstrap config kernel dream2lte
+          pmbootstrap config user duy
+          pmbootstrap config ui "${{ github.event.inputs.ui }}"
+          pmbootstrap config systemd never || true
+          pmbootstrap config hostname s8plus-pmos
+          pmbootstrap config locale en_US.UTF-8
+          pmbootstrap config timezone Asia/Ho_Chi_Minh
+          pmbootstrap config jobs 4
+          pmbootstrap config ccache_size 0
+          pmbootstrap config extra_packages device-samsung-dream-nonfree-firmware
+          pmbootstrap config build_pkgs_on_install True || true
+          pmbootstrap config ssh_keys False || true
+
+      - name: Patch deviceinfo sector 4096 nodebug
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
+          DEVICEINFO="$(find "$PMAPORTS/device" -path "*/device-samsung-dream/deviceinfo" -print -quit)"
+          APKBUILD="$(find "$PMAPORTS/device" -path "*/device-samsung-dream/APKBUILD" -print -quit)"
+
+          test -n "$DEVICEINFO"
+          test -n "$APKBUILD"
+
+          if grep -q '^deviceinfo_rootfs_image_sector_size=' "$DEVICEINFO"; then
+            sed -i 's|^deviceinfo_rootfs_image_sector_size=.*|deviceinfo_rootfs_image_sector_size="4096"|' "$DEVICEINFO"
+          else
+            echo 'deviceinfo_rootfs_image_sector_size="4096"' >> "$DEVICEINFO"
+          fi
+
+          if grep -q '^deviceinfo_kernel_cmdline=' "$DEVICEINFO"; then
+            sed -i 's|^deviceinfo_kernel_cmdline=.*|deviceinfo_kernel_cmdline="loglevel=7 rootwait PMOS_RAWIMG_SECTOR4096_NODEBUG_V1"|' "$DEVICEINFO"
+          else
+            echo 'deviceinfo_kernel_cmdline="loglevel=7 rootwait PMOS_RAWIMG_SECTOR4096_NODEBUG_V1"' >> "$DEVICEINFO"
+          fi
+
+          sed -i 's/^pkgrel=.*/pkgrel=9001/' "$APKBUILD"
+
+          pmbootstrap --details-to-stdout checksum device-samsung-dream
+          pmbootstrap --details-to-stdout build --force --arch=aarch64 device-samsung-dream
+
+      - name: Build raw disk image
+        run: |
+          pmbootstrap --details-to-stdout install \
+            --zap \
+            --sector-size 4096 \
+            --no-sparse \
+            --no-fde \
+            --password "123456"
+
+      - name: Export images
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf out
+          mkdir -p out
+
+          pmbootstrap --details-to-stdout export out
+
+          echo "Exported files:"
+          find out -maxdepth 2 -type f -print -exec ls -lh {} \;
+
+          IMG="$(find out -type f -name '*.img' ! -name 'boot.img' | head -n 1)"
+          BOOT="$(find out -type f -name 'boot.img' | head -n 1 || true)"
+
+          test -n "$IMG"
+
+          mv "$IMG" out/pmos-samsung-dream2lte-RAW-SECTOR4096-NODEBUG-V1.img
+
+          if [ -n "$BOOT" ]; then
+            cp "$BOOT" out/boot-RAW-SECTOR4096-NODEBUG-V1.img
+          fi
+
+          gzip -9 out/pmos-samsung-dream2lte-RAW-SECTOR4096-NODEBUG-V1.img
+
+          {
+            echo "RAW_IMAGE_BUILD=YES"
+            echo "SECTOR_SIZE=4096"
+            echo "NO_DEBUG_SHELL=YES"
+            echo "SYSTEMD=NEVER"
+            echo "UI=${{ github.event.inputs.ui }}"
+            echo "RUN_ID=${{ github.run_id }}"
+            echo "RUN_NUMBER=${{ github.run_number }}"
+          } > out/BUILD_MARKER_RAW_SECTOR4096_NODEBUG_V1.txt
+
+          ls -lh out
+
+      - name: Upload raw image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: postmarketOS-samsung-dream2lte-console-RAW-SECTOR4096-NODEBUG-V1
+          path: out/**
+          if-no-files-found: error
+          retention-days: 7
