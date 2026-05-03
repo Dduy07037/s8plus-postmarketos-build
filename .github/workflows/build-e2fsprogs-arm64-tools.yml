@@ -1,0 +1,85 @@
+name: Build ARM64 e2fsprogs tools
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Configure apt sources for arm64 ports
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo sed -i '/^Types:/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+
+          sudo tee /etc/apt/sources.list.d/ubuntu-ports-arm64.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-security noble-backports
+          Components: main universe restricted multiverse
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+
+          sudo dpkg --add-architecture arm64
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get update
+
+      - name: Download ARM64 e2fsprogs and runtime libraries
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p work out/e2tools/sbin out/e2tools/lib out/e2tools/usr/lib
+          cd work
+
+          apt-get download \
+            e2fsprogs:arm64 \
+            e2fsck-static:arm64 \
+            libc6:arm64 \
+            libext2fs2:arm64 \
+            libcom-err2:arm64 \
+            libblkid1:arm64 \
+            libuuid1:arm64 \
+            libe2p2:arm64
+
+          mkdir extract
+
+          for deb in *.deb; do
+            echo "Extracting $deb"
+            dpkg-deb -x "$deb" extract
+          done
+
+          echo "Extracted relevant files:"
+          find extract -type f \( -name 'tune2fs' -o -name 'e2fsck.static' -o -name 'ld-linux-aarch64.so.1' -o -name '*.so*' \) | sort
+
+          cp -a extract/sbin/tune2fs ../out/e2tools/sbin/
+          cp -a extract/sbin/e2fsck.static ../out/e2tools/sbin/
+          cp -a extract/lib/ld-linux-aarch64.so.1 ../out/e2tools/lib/
+
+          cp -a extract/lib/aarch64-linux-gnu/*.so* ../out/e2tools/usr/lib/ 2>/dev/null || true
+          cp -a extract/usr/lib/aarch64-linux-gnu/*.so* ../out/e2tools/usr/lib/ 2>/dev/null || true
+
+          chmod +x ../out/e2tools/sbin/tune2fs
+          chmod +x ../out/e2tools/sbin/e2fsck.static
+
+          file ../out/e2tools/sbin/tune2fs
+          file ../out/e2tools/sbin/e2fsck.static
+          find ../out/e2tools -type f -maxdepth 4 -print | sort
+
+          cd ../out
+          tar -czf e2tools-arm64.tar.gz e2tools
+          sha256sum e2tools-arm64.tar.gz > e2tools-arm64.tar.gz.sha256
+          ls -lh
+
+      - name: Upload e2fsprogs tools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2fsprogs-arm64-tools
+          path: out/**
+          if-no-files-found: error
+          retention-days: 7
