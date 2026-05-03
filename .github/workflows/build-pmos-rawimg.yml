@@ -29,12 +29,17 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Init pmbootstrap
+        shell: bash
         run: |
-          pmbootstrap --details-to-stdout init \
-            --aports=https://gitlab.postmarketos.org/postmarketOS/pmaports.git \
-            --device=samsung-dream \
-            --kernel=dream2lte \
-            --ui="${{ github.event.inputs.ui }}"
+          set -euxo pipefail
+
+          yes "" | pmbootstrap \
+            --details-to-stdout \
+            -p https://gitlab.postmarketos.org/postmarketOS/pmaports.git \
+            -y \
+            init || true
+
+          pmbootstrap --details-to-stdout status || true
 
       - name: Configure target
         run: |
