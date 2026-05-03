@@ -1,6 +1,6 @@
 name: Build postmarketOS for Galaxy S8 Plus dream2lte
 
-run-name: "pmOS S8+ ${{ github.event.inputs.ui }} OPENRC-SECTOR4096-NODEBUG-V1 #${{ github.run_number }}"
+run-name: "pmOS S8+ ${{ github.event.inputs.ui }} OPENRC-SECTOR4096-NODEBUG-V2 #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
@@ -83,13 +83,13 @@ jobs:
           pmbootstrap config hostname s8plus-pmos
           pmbootstrap config locale en_US.UTF-8
           pmbootstrap config timezone Asia/Ho_Chi_Minh
-          pmbootstrap config jobs 2
+          pmbootstrap config jobs 4
           pmbootstrap config ccache_size 0
           pmbootstrap config extra_packages device-samsung-dream-nonfree-firmware
           pmbootstrap config build_pkgs_on_install True || true
           pmbootstrap config ssh_keys False || true
 
-      - name: Patch samsung-dream sector size and NODEBUG cmdline
+      - name: Patch samsung-dream sector size NODEBUG
         shell: bash
         run: |
           set -euxo pipefail
@@ -99,42 +99,36 @@ jobs:
           DEVICEINFO="$(find "$PMAPORTS/device" -path "*/device-samsung-dream/deviceinfo" -print -quit)"
           APKBUILD="$(find "$PMAPORTS/device" -path "*/device-samsung-dream/APKBUILD" -print -quit)"
 
-          echo "DEVICEINFO=$DEVICEINFO"
-          echo "APKBUILD=$APKBUILD"
-
           test -n "$DEVICEINFO"
           test -n "$APKBUILD"
 
+          echo "DEVICEINFO=$DEVICEINFO"
+          echo "APKBUILD=$APKBUILD"
+
           echo "Before patch:"
-          cat "$DEVICEINFO"
           grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline" "$DEVICEINFO" || true
 
-          if grep -q "^deviceinfo_rootfs_image_sector_size=" "$DEVICEINFO"; then
-            sed -i 's/^deviceinfo_rootfs_image_sector_size=.*/deviceinfo_rootfs_image_sector_size="4096"/' "$DEVICEINFO"
+          if grep -q '^deviceinfo_rootfs_image_sector_size=' "$DEVICEINFO"; then
+            sed -i 's|^deviceinfo_rootfs_image_sector_size=.*|deviceinfo_rootfs_image_sector_size="4096"|' "$DEVICEINFO"
           else
             echo 'deviceinfo_rootfs_image_sector_size="4096"' >> "$DEVICEINFO"
           fi
 
-          printf '%s\n' '' '# SECTOR4096 no-debug boot test' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} loglevel=7 rootwait PMOS_SECTOR4096_NODEBUG_V1"' >> "$DEVICEINFO"
+          if grep -q '^deviceinfo_kernel_cmdline=' "$DEVICEINFO"; then
+            sed -i 's|^deviceinfo_kernel_cmdline=.*|deviceinfo_kernel_cmdline="loglevel=7 rootwait PMOS_SECTOR4096_NODEBUG_V2"|' "$DEVICEINFO"
+          else
+            echo 'deviceinfo_kernel_cmdline="loglevel=7 rootwait PMOS_SECTOR4096_NODEBUG_V2"' >> "$DEVICEINFO"
+          fi
 
           echo "After patch:"
-          cat "$DEVICEINFO"
-          grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline\|PMOS_SECTOR4096_NODEBUG_V1" "$DEVICEINFO" || true
+          grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline\|PMOS_SECTOR4096_NODEBUG_V2" "$DEVICEINFO" || true
 
-          echo "Bump pkgrel:"
-          sed -i 's/^pkgrel=.*/pkgrel=4096/' "$APKBUILD"
+          sed -i 's/^pkgrel=.*/pkgrel=9999/' "$APKBUILD"
 
-          echo "Update checksum:"
           pmbootstrap --details-to-stdout checksum device-samsung-dream
-
-          echo "Build patched device package for target arch aarch64:"
           pmbootstrap --details-to-stdout build --force --arch=aarch64 device-samsung-dream
 
-          echo "Verify built aarch64 REAL device APK contains sector 4096 marker:"
-
-          echo "All matching APKs:"
-          find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'device-samsung-dream*.apk' | sort || true
-
+          echo "Verify real device APK:"
           APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f \
             | grep '/aarch64/device-samsung-dream-[0-9].*\.apk$' \
             | sort \
@@ -143,33 +137,14 @@ jobs:
           echo "APK=$APK"
           test -n "$APK"
 
-          case "$(basename "$APK")" in
-            device-samsung-dream-[0-9]*.apk)
-              echo "Correct real device APK selected: $(basename "$APK")"
-              ;;
-            *)
-              echo "ERROR: wrong APK selected: $APK"
-              exit 1
-              ;;
-          esac
-
           rm -rf /tmp/check-device-apk
           mkdir -p /tmp/check-device-apk
           tar -xzf "$APK" -C /tmp/check-device-apk
 
-          echo "Extracted device APK files:"
-          find /tmp/check-device-apk -type f | sort
-
-          echo "Search marker inside extracted real device APK:"
-          grep -Rsn 'deviceinfo_rootfs_image_sector_size="4096"\|PMOS_SECTOR4096_NODEBUG_V1' /tmp/check-device-apk || {
-            echo "ERROR: real device-samsung-dream APK does not contain sector 4096 NODEBUG patch"
-            echo "APK checked: $APK"
-            echo "Try showing deviceinfo if present:"
-            find /tmp/check-device-apk -type f -name deviceinfo -print -exec cat {} \; || true
+          grep -Rsn 'deviceinfo_rootfs_image_sector_size="4096"\|PMOS_SECTOR4096_NODEBUG_V2' /tmp/check-device-apk || {
+            echo "ERROR: real device package does not contain sector/cmdline patch"
             exit 1
           }
-
-          echo "device-samsung-dream real aarch64 APK sector NODEBUG patch OK"
 
       - name: Show pmbootstrap status and config
         run: |
@@ -179,33 +154,32 @@ jobs:
       - name: Build Android recovery ZIP
         run: |
           pmbootstrap --details-to-stdout install \
+            --zap \
+            --sector-size 4096 \
             --android-recovery-zip \
             --recovery-install-partition=data \
             --no-fde \
             --password "123456"
 
-      - name: Verify NODEBUG cmdline
+      - name: Verify generated boot image NODEBUG
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "Search generated boot files for cmdline/debug markers:"
-          found_nodebug=0
+          found_good=0
           found_bad=0
 
           while IFS= read -r f; do
-            echo "=== checking $f ==="
+            echo "=== $f ==="
             file "$f" || true
 
-            if grep -a -q 'PMOS_SECTOR4096_NODEBUG_V1' "$f"; then
-              echo "NODEBUG_MARKER_FOUND_IN=$f"
-              grep -aH 'PMOS_SECTOR4096_NODEBUG_V1' "$f" || true
-              found_nodebug=1
+            if grep -a -q 'PMOS_SECTOR4096_NODEBUG_V2' "$f"; then
+              grep -aH 'PMOS_SECTOR4096_NODEBUG_V2' "$f"
+              found_good=1
             fi
 
             if grep -a -q 'pmos.debug-shell\|PMOS_NO_OUTPUT_REDIRECT\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$f"; then
-              echo "BAD_DEBUG_OR_ROOT_MARKER_FOUND_IN=$f"
-              grep -aH 'pmos.debug-shell\|PMOS_NO_OUTPUT_REDIRECT\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$f" || true
+              grep -aH 'pmos.debug-shell\|PMOS_NO_OUTPUT_REDIRECT\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$f"
               found_bad=1
             fi
           done < <(
@@ -216,17 +190,8 @@ jobs:
               | sort
           )
 
-          if [ "$found_nodebug" -ne 1 ]; then
-            echo "ERROR: PMOS_SECTOR4096_NODEBUG_V1 not found in generated boot files"
-            exit 1
-          fi
-
-          if [ "$found_bad" -ne 0 ]; then
-            echo "ERROR: old debug/root cmdline marker still exists. Do not flash."
-            exit 1
-          fi
-
-          echo "NODEBUG boot image verification OK"
+          test "$found_good" -eq 1
+          test "$found_bad" -eq 0
 
       - name: Export files
         run: |
@@ -235,7 +200,7 @@ jobs:
           find out -maxdepth 2 -type f -print
           ls -lh out
 
-      - name: Rename and mark OPENRC NODEBUG artifact
+      - name: Rename and mark OPENRC NODEBUG V2 artifact
         shell: bash
         run: |
           set -euxo pipefail
@@ -243,19 +208,22 @@ jobs:
 
           test -f ./pmos-samsung-dream.zip
 
-          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-OPENRC-SECTOR4096-NODEBUG-V1.zip
+          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-OPENRC-SECTOR4096-NODEBUG-V2.zip
 
           {
             echo "OPENRC_BUILD=YES"
             echo "SYSTEMD=NEVER"
             echo "SECTOR4096_NODEBUG_BUILD=YES"
+            echo "SECTOR_SIZE=4096"
             echo "NO_PMOS_DEBUG_SHELL=YES"
+            echo "NO_PMOS_NO_OUTPUT_REDIRECT=YES"
             echo "NO_ROOT_LOOP0P2_CMDLINE=YES"
+            echo "NODEBUG_MARKER=PMOS_SECTOR4096_NODEBUG_V2"
             echo "RUN_ID=${{ github.run_id }}"
             echo "RUN_NUMBER=${{ github.run_number }}"
             echo "UI=${{ github.event.inputs.ui }}"
             echo "DATE_UTC=$(date -u)"
-          } > ./BUILD_MARKER_OPENRC_SECTOR4096_NODEBUG_V1.txt
+          } > ./BUILD_MARKER_OPENRC_SECTOR4096_NODEBUG_V2.txt
 
           find . -maxdepth 1 -type f -print
           ls -lh
@@ -263,7 +231,7 @@ jobs:
       - name: Upload postmarketOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-OPENRC-SECTOR4096-NODEBUG-V1
+          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-OPENRC-SECTOR4096-NODEBUG-V2
           path: out/**
           if-no-files-found: error
           retention-days: 7
