@@ -366,8 +366,23 @@ jobs:
           echo "Update checksum:"
           pmbootstrap --details-to-stdout checksum postmarketos-initramfs
 
-          echo "Build patched postmarketos-initramfs:"
-          pmbootstrap --details-to-stdout build --force postmarketos-initramfs
+          echo "Build patched postmarketos-initramfs for TARGET ARCH aarch64:"
+          pmbootstrap --details-to-stdout build --force --arch=aarch64 postmarketos-initramfs
+
+          echo "Verify built APK contains V4 marker:"
+          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'postmarketos-initramfs-*.apk' | grep '/aarch64/' | sort | tail -n 1)"
+          echo "APK=$APK"
+          test -n "$APK"
+
+          mkdir -p /tmp/check-initramfs-apk
+          tar -xzf "$APK" -C /tmp/check-initramfs-apk
+
+          grep -Rsn "samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt" /tmp/check-initramfs-apk || {
+            echo "ERROR: built aarch64 postmarketos-initramfs APK does not contain V4 marker"
+            exit 1
+          }
+
+          echo "Built aarch64 postmarketos-initramfs APK contains V4 marker OK"
 
       - name: Build Android recovery ZIP
         run: |
@@ -382,15 +397,26 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "Verify V4 marker in pmaports source:"
+          echo "1) Verify V4 marker in pmaports source:"
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
-          grep -Rsn "samsung-dream-force-v4\|pmos-force-root-v4-mounted" "$PMAPORTS/main/postmarketos-initramfs"
+          grep -Rsn "samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt" "$PMAPORTS/main/postmarketos-initramfs"
 
-          echo "Search generated boot/initramfs files for V4 marker:"
+          echo "2) Verify V4 marker in built aarch64 APK:"
+          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'postmarketos-initramfs-*.apk' | grep '/aarch64/' | sort | tail -n 1)"
+          echo "APK=$APK"
+          test -n "$APK"
+
+          rm -rf /tmp/check-initramfs-apk
+          mkdir -p /tmp/check-initramfs-apk
+          tar -xzf "$APK" -C /tmp/check-initramfs-apk
+
+          grep -Rsn "samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt" /tmp/check-initramfs-apk
+
+          echo "3) Verify V4 marker in generated boot/initramfs files only:"
           found=0
 
           while IFS= read -r f; do
-            echo "=== checking $f ==="
+            echo "=== checking generated file: $f ==="
             file "$f" || true
 
             if grep -a -q 'samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt' "$f"; then
@@ -408,13 +434,22 @@ jobs:
                 fi
               fi
             done
-          done < <(find "$HOME/.local/var/pmbootstrap" -type f \( -name 'initramfs*' -o -name 'boot.img' \) | sort)
+          done < <(
+            find "$HOME/.local/var/pmbootstrap" -type f \
+              \( -name 'initramfs' -o -name 'initramfs-extra' -o -name 'boot.img' \) \
+              ! -path '*/pmaports/*' \
+              ! -path '*/cache_git/*' \
+              | sort
+          )
 
           if [ "$found" -ne 1 ]; then
             echo "ERROR: V4 marker not found in generated boot/initramfs files."
+            echo "This means the patched package was built but did not get installed into the rootfs/initramfs."
             echo "Do not flash this build."
             exit 1
           fi
+
+          echo "V4 marker found in generated boot/initramfs files OK"
 
       - name: Export files
         run: |
