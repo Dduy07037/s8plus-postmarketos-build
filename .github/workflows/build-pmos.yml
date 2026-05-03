@@ -1,6 +1,6 @@
 name: Build postmarketOS for Galaxy S8 Plus dream2lte
 
-run-name: "pmOS S8+ ${{ github.event.inputs.ui }} SECTOR4096-NODEBUG-V1 #${{ github.run_number }}"
+run-name: "pmOS S8+ ${{ github.event.inputs.ui }} OPENRC-SECTOR4096-NODEBUG-V1 #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
@@ -8,12 +8,12 @@ on:
       ui:
         description: "User interface"
         required: true
-        default: "xfce4"
+        default: "console"
         type: choice
         options:
+          - console
           - xfce4
           - phosh
-          - console
 
 jobs:
   build:
@@ -79,6 +79,7 @@ jobs:
           pmbootstrap config kernel dream2lte
           pmbootstrap config user duy
           pmbootstrap config ui "${{ github.event.inputs.ui }}"
+          pmbootstrap config systemd never || true
           pmbootstrap config hostname s8plus-pmos
           pmbootstrap config locale en_US.UTF-8
           pmbootstrap config timezone Asia/Ho_Chi_Minh
@@ -108,17 +109,12 @@ jobs:
           cat "$DEVICEINFO"
           grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline" "$DEVICEINFO" || true
 
-          # Critical fix for Samsung userdata nested partition sector size.
-          # Without this, pmOS initramfs searches wrong offsets and says:
-          # "Waiting for boot partition" / "boot partition not found".
           if grep -q "^deviceinfo_rootfs_image_sector_size=" "$DEVICEINFO"; then
             sed -i 's/^deviceinfo_rootfs_image_sector_size=.*/deviceinfo_rootfs_image_sector_size="4096"/' "$DEVICEINFO"
           else
             echo 'deviceinfo_rootfs_image_sector_size="4096"' >> "$DEVICEINFO"
           fi
 
-          # SECTOR4096 NODEBUG boot test.
-          # Do NOT force root=/dev/loop0p2 here.
           printf '%s\n' '' '# SECTOR4096 no-debug boot test' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} loglevel=7 rootwait PMOS_SECTOR4096_NODEBUG_V1"' >> "$DEVICEINFO"
 
           echo "After patch:"
@@ -139,12 +135,6 @@ jobs:
           echo "All matching APKs:"
           find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'device-samsung-dream*.apk' | sort || true
 
-          # IMPORTANT:
-          # Pick ONLY the real device package:
-          #   device-samsung-dream-5-r4096.apk
-          # Exclude:
-          #   device-samsung-dream-kernel-*.apk
-          #   device-samsung-dream-nonfree-firmware-*.apk
           APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f \
             | grep '/aarch64/device-samsung-dream-[0-9].*\.apk$' \
             | sort \
@@ -245,39 +235,35 @@ jobs:
           find out -maxdepth 2 -type f -print
           ls -lh out
 
-      - name: Rename and mark SECTOR4096 NODEBUG artifact
+      - name: Rename and mark OPENRC NODEBUG artifact
         shell: bash
         run: |
           set -euxo pipefail
           cd out
 
-          echo "Before rename:"
-          find . -maxdepth 1 -type f -print
-          ls -lh
-
           test -f ./pmos-samsung-dream.zip
 
-          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-SECTOR4096-NODEBUG-V1.zip
+          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-OPENRC-SECTOR4096-NODEBUG-V1.zip
 
           {
+            echo "OPENRC_BUILD=YES"
+            echo "SYSTEMD=NEVER"
             echo "SECTOR4096_NODEBUG_BUILD=YES"
             echo "NO_PMOS_DEBUG_SHELL=YES"
-            echo "NO_PMOS_NO_OUTPUT_REDIRECT=YES"
             echo "NO_ROOT_LOOP0P2_CMDLINE=YES"
             echo "RUN_ID=${{ github.run_id }}"
             echo "RUN_NUMBER=${{ github.run_number }}"
             echo "UI=${{ github.event.inputs.ui }}"
             echo "DATE_UTC=$(date -u)"
-          } > ./BUILD_MARKER_SECTOR4096_NODEBUG_V1.txt
+          } > ./BUILD_MARKER_OPENRC_SECTOR4096_NODEBUG_V1.txt
 
-          echo "After rename:"
           find . -maxdepth 1 -type f -print
           ls -lh
 
       - name: Upload postmarketOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-SECTOR4096-NODEBUG-V1
+          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-OPENRC-SECTOR4096-NODEBUG-V1
           path: out/**
           if-no-files-found: error
           retention-days: 7
