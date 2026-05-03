@@ -1,5 +1,7 @@
 name: Build postmarketOS for Galaxy S8 Plus dream2lte
 
+run-name: "pmOS S8+ ${{ github.event.inputs.ui }} FORCE-ROOT-V3 #${{ github.run_number }}"
+
 on:
   workflow_dispatch:
     inputs:
@@ -403,10 +405,33 @@ jobs:
           find out -maxdepth 2 -type f -print
           ls -lh out
 
+      - name: Rename exported ZIP with force-root marker
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd out
+
+          echo "Before rename:"
+          find . -maxdepth 1 -type f -print
+          ls -lh
+
+          test -f ./pmos-samsung-dream.zip
+
+          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-force-root-v3.zip
+
+          echo "FORCE_ROOT_V3_BUILD=YES" > ./BUILD_MARKER_FORCE_ROOT_V3.txt
+          echo "UI=${{ github.event.inputs.ui }}" >> ./BUILD_MARKER_FORCE_ROOT_V3.txt
+          echo "RUN_ID=${{ github.run_id }}" >> ./BUILD_MARKER_FORCE_ROOT_V3.txt
+          echo "RUN_NUMBER=${{ github.run_number }}" >> ./BUILD_MARKER_FORCE_ROOT_V3.txt
+
+          echo "After rename:"
+          find . -maxdepth 1 -type f -print
+          ls -lh
+
       - name: Upload postmarketOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}
+          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-FORCE-ROOT-V3
           path: out/**
           if-no-files-found: error
           retention-days: 7
