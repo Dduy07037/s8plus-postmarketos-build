@@ -134,20 +134,34 @@ jobs:
           echo "Build patched device package for target arch aarch64:"
           pmbootstrap --details-to-stdout build --force --arch=aarch64 device-samsung-dream
 
-          echo "Verify built aarch64 device APK contains sector 4096 marker:"
+          echo "Verify built aarch64 REAL device APK contains sector 4096 marker:"
 
           echo "All matching APKs:"
           find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'device-samsung-dream*.apk' | sort || true
 
-          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'device-samsung-dream-*.apk' \
-            | grep '/aarch64/' \
-            | grep -v 'nonfree-firmware' \
-            | grep -v 'firmware' \
+          # IMPORTANT:
+          # Pick ONLY the real device package:
+          #   device-samsung-dream-5-r4096.apk
+          # Exclude:
+          #   device-samsung-dream-kernel-*.apk
+          #   device-samsung-dream-nonfree-firmware-*.apk
+          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f \
+            | grep '/aarch64/device-samsung-dream-[0-9].*\.apk$' \
             | sort \
             | tail -n 1)"
 
           echo "APK=$APK"
           test -n "$APK"
+
+          case "$(basename "$APK")" in
+            device-samsung-dream-[0-9]*.apk)
+              echo "Correct real device APK selected: $(basename "$APK")"
+              ;;
+            *)
+              echo "ERROR: wrong APK selected: $APK"
+              exit 1
+              ;;
+          esac
 
           rm -rf /tmp/check-device-apk
           mkdir -p /tmp/check-device-apk
@@ -156,13 +170,16 @@ jobs:
           echo "Extracted device APK files:"
           find /tmp/check-device-apk -type f | sort
 
+          echo "Search marker inside extracted real device APK:"
           grep -Rsn 'deviceinfo_rootfs_image_sector_size="4096"\|PMOS_SECTOR4096_CLEAN_V1' /tmp/check-device-apk || {
-            echo "ERROR: built aarch64 real device-samsung-dream APK does not contain sector 4096 patch"
+            echo "ERROR: real device-samsung-dream APK does not contain sector 4096 patch"
             echo "APK checked: $APK"
+            echo "Try showing deviceinfo if present:"
+            find /tmp/check-device-apk -type f -name deviceinfo -print -exec cat {} \; || true
             exit 1
           }
 
-          echo "device-samsung-dream aarch64 APK sector patch OK"
+          echo "device-samsung-dream real aarch64 APK sector patch OK"
 
       - name: Show pmbootstrap status and config
         run: |
