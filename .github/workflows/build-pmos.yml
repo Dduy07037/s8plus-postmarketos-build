@@ -398,6 +398,51 @@ jobs:
             --no-fde \
             --password "123456"
 
+      - name: Verify FORCE ROOT V3 is inside generated initramfs
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "Find generated initramfs files:"
+          find "$HOME/.local/var/pmbootstrap" -type f \( -name 'initramfs*' -o -name 'boot.img' \) -printf '%p %s bytes\n' | sort || true
+
+          WORK="$PWD/verify-initramfs"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+
+          found_marker=0
+
+          while IFS= read -r f; do
+            echo "=== checking: $f ==="
+            file "$f" || true
+
+            if grep -a -q 'samsung-dream-force-v3\|pmos-root-handoff-debug-v3\|pmos-initramfs-mounted-root-v3\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$f"; then
+              echo "RAW_MARKER_FOUND_IN=$f"
+              grep -aH 'samsung-dream-force-v3\|pmos-root-handoff-debug-v3\|pmos-initramfs-mounted-root-v3\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$f" || true
+              found_marker=1
+            fi
+
+            base="$(basename "$f" | tr '/ ' '__')"
+
+            for cmd in "gzip -dc" "zcat" "xzcat" "lz4cat" "zstdcat"; do
+              out="$WORK/${base}.$(echo "$cmd" | cut -d' ' -f1).out"
+              if $cmd "$f" > "$out" 2>/dev/null; then
+                if grep -a -q 'samsung-dream-force-v3\|pmos-root-handoff-debug-v3\|pmos-initramfs-mounted-root-v3\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$out"; then
+                  echo "DECOMPRESSED_MARKER_FOUND_IN=$f via $cmd"
+                  grep -aH 'samsung-dream-force-v3\|pmos-root-handoff-debug-v3\|pmos-initramfs-mounted-root-v3\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$out" || true
+                  found_marker=1
+                fi
+              fi
+            done
+
+          done < <(find "$HOME/.local/var/pmbootstrap" -type f \( -name 'initramfs*' -o -name 'boot.img' \) | sort)
+
+          if [ "$found_marker" -ne 1 ]; then
+            echo "ERROR: No FORCE ROOT V3 marker found in generated boot/initramfs files."
+            echo "Do not flash this build."
+            exit 1
+          fi
+
       - name: Export files
         run: |
           mkdir -p out
@@ -405,33 +450,37 @@ jobs:
           find out -maxdepth 2 -type f -print
           ls -lh out
 
-      - name: Rename exported ZIP with force-root marker
+      - name: Rename and mark FORCE ROOT V3 artifact
         shell: bash
         run: |
           set -euxo pipefail
           cd out
 
-          echo "Before rename:"
+          echo "=== exported files before rename ==="
           find . -maxdepth 1 -type f -print
           ls -lh
 
           test -f ./pmos-samsung-dream.zip
 
-          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-force-root-v3.zip
+          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-FORCE-ROOT-V3-VERIFIED.zip
 
-          echo "FORCE_ROOT_V3_BUILD=YES" > ./BUILD_MARKER_FORCE_ROOT_V3.txt
-          echo "UI=${{ github.event.inputs.ui }}" >> ./BUILD_MARKER_FORCE_ROOT_V3.txt
-          echo "RUN_ID=${{ github.run_id }}" >> ./BUILD_MARKER_FORCE_ROOT_V3.txt
-          echo "RUN_NUMBER=${{ github.run_number }}" >> ./BUILD_MARKER_FORCE_ROOT_V3.txt
+          {
+            echo "FORCE_ROOT_V3_BUILD=YES"
+            echo "FORCE_ROOT_V3_VERIFIED=YES"
+            echo "RUN_ID=${{ github.run_id }}"
+            echo "RUN_NUMBER=${{ github.run_number }}"
+            echo "UI=${{ github.event.inputs.ui }}"
+            echo "DATE_UTC=$(date -u)"
+          } > ./BUILD_MARKER_FORCE_ROOT_V3_VERIFIED.txt
 
-          echo "After rename:"
+          echo "=== exported files after rename ==="
           find . -maxdepth 1 -type f -print
           ls -lh
 
       - name: Upload postmarketOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-FORCE-ROOT-V3
+          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-FORCE-ROOT-V3-VERIFIED
           path: out/**
           if-no-files-found: error
           retention-days: 7
