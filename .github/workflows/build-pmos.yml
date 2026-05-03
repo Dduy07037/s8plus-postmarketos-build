@@ -135,7 +135,17 @@ jobs:
           pmbootstrap --details-to-stdout build --force --arch=aarch64 device-samsung-dream
 
           echo "Verify built aarch64 device APK contains sector 4096 marker:"
-          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'device-samsung-dream-*.apk' | grep '/aarch64/' | sort | tail -n 1)"
+
+          echo "All matching APKs:"
+          find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'device-samsung-dream*.apk' | sort || true
+
+          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'device-samsung-dream-*.apk' \
+            | grep '/aarch64/' \
+            | grep -v 'nonfree-firmware' \
+            | grep -v 'firmware' \
+            | sort \
+            | tail -n 1)"
+
           echo "APK=$APK"
           test -n "$APK"
 
@@ -143,8 +153,12 @@ jobs:
           mkdir -p /tmp/check-device-apk
           tar -xzf "$APK" -C /tmp/check-device-apk
 
+          echo "Extracted device APK files:"
+          find /tmp/check-device-apk -type f | sort
+
           grep -Rsn 'deviceinfo_rootfs_image_sector_size="4096"\|PMOS_SECTOR4096_CLEAN_V1' /tmp/check-device-apk || {
-            echo "ERROR: built aarch64 device-samsung-dream APK does not contain sector 4096 patch"
+            echo "ERROR: built aarch64 real device-samsung-dream APK does not contain sector 4096 patch"
+            echo "APK checked: $APK"
             exit 1
           }
 
