@@ -41,11 +41,11 @@ jobs:
             e2fsprogs:arm64 \
             e2fsck-static:arm64 \
             libc6:arm64 \
-            libext2fs2:arm64 \
+            libext2fs2t64:arm64 \
             libcom-err2:arm64 \
             libblkid1:arm64 \
             libuuid1:arm64 \
-            libe2p2:arm64
+            libss2:arm64
 
           mkdir extract
 
@@ -55,11 +55,18 @@ jobs:
           done
 
           echo "Extracted relevant files:"
-          find extract -type f \( -name 'tune2fs' -o -name 'e2fsck.static' -o -name 'ld-linux-aarch64.so.1' -o -name '*.so*' \) | sort
+          find extract -type f \( \
+            -name 'tune2fs' \
+            -o -name 'e2fsck.static' \
+            -o -name 'ld-linux-aarch64.so.1' \
+            -o -name '*.so*' \
+          \) | sort
 
-          cp -a extract/sbin/tune2fs ../out/e2tools/sbin/
-          cp -a extract/sbin/e2fsck.static ../out/e2tools/sbin/
-          cp -a extract/lib/ld-linux-aarch64.so.1 ../out/e2tools/lib/
+          cp -a extract/usr/sbin/tune2fs ../out/e2tools/sbin/ 2>/dev/null || cp -a extract/sbin/tune2fs ../out/e2tools/sbin/
+          cp -a extract/usr/sbin/e2fsck.static ../out/e2tools/sbin/ 2>/dev/null || cp -a extract/sbin/e2fsck.static ../out/e2tools/sbin/
+
+          cp -a extract/lib/ld-linux-aarch64.so.1 ../out/e2tools/lib/ 2>/dev/null || true
+          cp -a extract/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 ../out/e2tools/lib/ 2>/dev/null || true
 
           cp -a extract/lib/aarch64-linux-gnu/*.so* ../out/e2tools/usr/lib/ 2>/dev/null || true
           cp -a extract/usr/lib/aarch64-linux-gnu/*.so* ../out/e2tools/usr/lib/ 2>/dev/null || true
@@ -69,7 +76,9 @@ jobs:
 
           file ../out/e2tools/sbin/tune2fs
           file ../out/e2tools/sbin/e2fsck.static
-          find ../out/e2tools -type f -maxdepth 4 -print | sort
+
+          echo "Final output tree:"
+          find ../out/e2tools -type f -print | sort
 
           cd ../out
           tar -czf e2tools-arm64.tar.gz e2tools
