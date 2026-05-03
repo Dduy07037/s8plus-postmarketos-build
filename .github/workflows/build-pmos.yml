@@ -1,6 +1,6 @@
 name: Build postmarketOS for Galaxy S8 Plus dream2lte
 
-run-name: "pmOS S8+ ${{ github.event.inputs.ui }} SECTOR4096-CLEAN-V1 #${{ github.run_number }}"
+run-name: "pmOS S8+ ${{ github.event.inputs.ui }} SECTOR4096-NODEBUG-V1 #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
@@ -84,11 +84,11 @@ jobs:
           pmbootstrap config timezone Asia/Ho_Chi_Minh
           pmbootstrap config jobs 2
           pmbootstrap config ccache_size 0
-          pmbootstrap config extra_packages device-samsung-dream-nonfree-firmware,postmarketos-mkinitfs-hook-debug-shell
+          pmbootstrap config extra_packages device-samsung-dream-nonfree-firmware
           pmbootstrap config build_pkgs_on_install True || true
           pmbootstrap config ssh_keys False || true
 
-      - name: Patch samsung-dream sector size and debug shell
+      - name: Patch samsung-dream sector size and NODEBUG cmdline
         shell: bash
         run: |
           set -euxo pipefail
@@ -117,13 +117,13 @@ jobs:
             echo 'deviceinfo_rootfs_image_sector_size="4096"' >> "$DEVICEINFO"
           fi
 
+          # SECTOR4096 NODEBUG boot test.
           # Do NOT force root=/dev/loop0p2 here.
-          # That caused: "root partition does not contain a root filesystem".
-          printf '%s\n' '' '# Forced debug build for boot diagnosis - SECTOR4096 clean build' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} pmos.debug-shell PMOS_NO_OUTPUT_REDIRECT loglevel=7 rootwait PMOS_SECTOR4096_CLEAN_V1"' >> "$DEVICEINFO"
+          printf '%s\n' '' '# SECTOR4096 no-debug boot test' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} loglevel=7 rootwait PMOS_SECTOR4096_NODEBUG_V1"' >> "$DEVICEINFO"
 
           echo "After patch:"
           cat "$DEVICEINFO"
-          grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline\|PMOS_SECTOR4096_CLEAN_V1" "$DEVICEINFO" || true
+          grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline\|PMOS_SECTOR4096_NODEBUG_V1" "$DEVICEINFO" || true
 
           echo "Bump pkgrel:"
           sed -i 's/^pkgrel=.*/pkgrel=4096/' "$APKBUILD"
@@ -171,15 +171,15 @@ jobs:
           find /tmp/check-device-apk -type f | sort
 
           echo "Search marker inside extracted real device APK:"
-          grep -Rsn 'deviceinfo_rootfs_image_sector_size="4096"\|PMOS_SECTOR4096_CLEAN_V1' /tmp/check-device-apk || {
-            echo "ERROR: real device-samsung-dream APK does not contain sector 4096 patch"
+          grep -Rsn 'deviceinfo_rootfs_image_sector_size="4096"\|PMOS_SECTOR4096_NODEBUG_V1' /tmp/check-device-apk || {
+            echo "ERROR: real device-samsung-dream APK does not contain sector 4096 NODEBUG patch"
             echo "APK checked: $APK"
             echo "Try showing deviceinfo if present:"
             find /tmp/check-device-apk -type f -name deviceinfo -print -exec cat {} \; || true
             exit 1
           }
 
-          echo "device-samsung-dream real aarch64 APK sector patch OK"
+          echo "device-samsung-dream real aarch64 APK sector NODEBUG patch OK"
 
       - name: Show pmbootstrap status and config
         run: |
@@ -194,6 +194,50 @@ jobs:
             --no-fde \
             --password "123456"
 
+      - name: Verify NODEBUG cmdline
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "Search generated boot files for cmdline/debug markers:"
+          found_nodebug=0
+          found_bad=0
+
+          while IFS= read -r f; do
+            echo "=== checking $f ==="
+            file "$f" || true
+
+            if grep -a -q 'PMOS_SECTOR4096_NODEBUG_V1' "$f"; then
+              echo "NODEBUG_MARKER_FOUND_IN=$f"
+              grep -aH 'PMOS_SECTOR4096_NODEBUG_V1' "$f" || true
+              found_nodebug=1
+            fi
+
+            if grep -a -q 'pmos.debug-shell\|PMOS_NO_OUTPUT_REDIRECT\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$f"; then
+              echo "BAD_DEBUG_OR_ROOT_MARKER_FOUND_IN=$f"
+              grep -aH 'pmos.debug-shell\|PMOS_NO_OUTPUT_REDIRECT\|root=/dev/loop0p2\|pmos_root=/dev/loop0p2' "$f" || true
+              found_bad=1
+            fi
+          done < <(
+            find "$HOME/.local/var/pmbootstrap" -type f \
+              \( -name 'boot.img' -o -name 'initramfs' -o -name 'initramfs-extra' \) \
+              ! -path '*/cache_git/*' \
+              ! -path '*/pmaports/*' \
+              | sort
+          )
+
+          if [ "$found_nodebug" -ne 1 ]; then
+            echo "ERROR: PMOS_SECTOR4096_NODEBUG_V1 not found in generated boot files"
+            exit 1
+          fi
+
+          if [ "$found_bad" -ne 0 ]; then
+            echo "ERROR: old debug/root cmdline marker still exists. Do not flash."
+            exit 1
+          fi
+
+          echo "NODEBUG boot image verification OK"
+
       - name: Export files
         run: |
           mkdir -p out
@@ -201,7 +245,7 @@ jobs:
           find out -maxdepth 2 -type f -print
           ls -lh out
 
-      - name: Rename and mark SECTOR4096 clean artifact
+      - name: Rename and mark SECTOR4096 NODEBUG artifact
         shell: bash
         run: |
           set -euxo pipefail
@@ -213,17 +257,18 @@ jobs:
 
           test -f ./pmos-samsung-dream.zip
 
-          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-SECTOR4096-CLEAN-V1.zip
+          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-SECTOR4096-NODEBUG-V1.zip
 
           {
-            echo "SECTOR4096_CLEAN_BUILD=YES"
+            echo "SECTOR4096_NODEBUG_BUILD=YES"
+            echo "NO_PMOS_DEBUG_SHELL=YES"
+            echo "NO_PMOS_NO_OUTPUT_REDIRECT=YES"
             echo "NO_ROOT_LOOP0P2_CMDLINE=YES"
-            echo "NO_FORCE_ROOT_V4=YES"
             echo "RUN_ID=${{ github.run_id }}"
             echo "RUN_NUMBER=${{ github.run_number }}"
             echo "UI=${{ github.event.inputs.ui }}"
             echo "DATE_UTC=$(date -u)"
-          } > ./BUILD_MARKER_SECTOR4096_CLEAN_V1.txt
+          } > ./BUILD_MARKER_SECTOR4096_NODEBUG_V1.txt
 
           echo "After rename:"
           find . -maxdepth 1 -type f -print
@@ -232,7 +277,7 @@ jobs:
       - name: Upload postmarketOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-SECTOR4096-CLEAN-V1
+          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-SECTOR4096-NODEBUG-V1
           path: out/**
           if-no-files-found: error
           retention-days: 7
