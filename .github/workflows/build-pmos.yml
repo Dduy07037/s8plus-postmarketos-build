@@ -1,6 +1,6 @@
 name: Build postmarketOS for Galaxy S8 Plus dream2lte
 
-run-name: "pmOS S8+ ${{ github.event.inputs.ui }} FORCE-ROOT-V4 #${{ github.run_number }}"
+run-name: "pmOS S8+ ${{ github.event.inputs.ui }} SECTOR4096-CLEAN-V1 #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
@@ -91,6 +91,8 @@ jobs:
       - name: Patch samsung-dream sector size and debug shell
         shell: bash
         run: |
+          set -euxo pipefail
+
           PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
 
           DEVICEINFO="$(find "$PMAPORTS/device" -path "*/device-samsung-dream/deviceinfo" -print -quit)"
@@ -103,286 +105,55 @@ jobs:
           test -n "$APKBUILD"
 
           echo "Before patch:"
+          cat "$DEVICEINFO"
           grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline" "$DEVICEINFO" || true
 
+          # Critical fix for Samsung userdata nested partition sector size.
+          # Without this, pmOS initramfs searches wrong offsets and says:
+          # "Waiting for boot partition" / "boot partition not found".
           if grep -q "^deviceinfo_rootfs_image_sector_size=" "$DEVICEINFO"; then
             sed -i 's/^deviceinfo_rootfs_image_sector_size=.*/deviceinfo_rootfs_image_sector_size="4096"/' "$DEVICEINFO"
           else
             echo 'deviceinfo_rootfs_image_sector_size="4096"' >> "$DEVICEINFO"
           fi
 
-          printf '%s\n' '' '# Forced debug build for boot diagnosis' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} pmos.debug-shell PMOS_NO_OUTPUT_REDIRECT loglevel=7 rootwait"' >> "$DEVICEINFO"
+          # Do NOT force root=/dev/loop0p2 here.
+          # That caused: "root partition does not contain a root filesystem".
+          printf '%s\n' '' '# Forced debug build for boot diagnosis - SECTOR4096 clean build' 'deviceinfo_kernel_cmdline="${deviceinfo_kernel_cmdline:-} pmos.debug-shell PMOS_NO_OUTPUT_REDIRECT loglevel=7 rootwait PMOS_SECTOR4096_CLEAN_V1"' >> "$DEVICEINFO"
 
           echo "After patch:"
-          grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline" "$DEVICEINFO" || true
+          cat "$DEVICEINFO"
+          grep -n "deviceinfo_rootfs_image_sector_size\|deviceinfo_kernel_cmdline\|PMOS_SECTOR4096_CLEAN_V1" "$DEVICEINFO" || true
 
           echo "Bump pkgrel:"
-          sed -i 's/^pkgrel=.*/pkgrel=999/' "$APKBUILD"
+          sed -i 's/^pkgrel=.*/pkgrel=4096/' "$APKBUILD"
 
-          echo "Update checksum and rebuild device package:"
+          echo "Update checksum:"
           pmbootstrap --details-to-stdout checksum device-samsung-dream
-          pmbootstrap --details-to-stdout build --force device-samsung-dream
+
+          echo "Build patched device package for target arch aarch64:"
+          pmbootstrap --details-to-stdout build --force --arch=aarch64 device-samsung-dream
+
+          echo "Verify built aarch64 device APK contains sector 4096 marker:"
+          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'device-samsung-dream-*.apk' | grep '/aarch64/' | sort | tail -n 1)"
+          echo "APK=$APK"
+          test -n "$APK"
+
+          rm -rf /tmp/check-device-apk
+          mkdir -p /tmp/check-device-apk
+          tar -xzf "$APK" -C /tmp/check-device-apk
+
+          grep -Rsn 'deviceinfo_rootfs_image_sector_size="4096"\|PMOS_SECTOR4096_CLEAN_V1' /tmp/check-device-apk || {
+            echo "ERROR: built aarch64 device-samsung-dream APK does not contain sector 4096 patch"
+            exit 1
+          }
+
+          echo "device-samsung-dream aarch64 APK sector patch OK"
 
       - name: Show pmbootstrap status and config
         run: |
           pmbootstrap status || true
           pmbootstrap config || true
-
-      - name: Patch postmarketos-initramfs root handoff for samsung-dream V4
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
-          PKGDIR="$PMAPORTS/main/postmarketos-initramfs"
-          FUN="$PKGDIR/init_functions.sh"
-          APKBUILD="$PKGDIR/APKBUILD"
-
-          echo "PKGDIR=$PKGDIR"
-          echo "FUN=$FUN"
-          echo "APKBUILD=$APKBUILD"
-
-          test -d "$PKGDIR"
-          test -f "$FUN"
-          test -f "$APKBUILD"
-
-          echo "Current relevant functions:"
-          grep -nE "^[a-zA-Z0-9_]+[[:space:]]*\(\)[[:space:]]*\{" "$FUN" | grep -E "root|mount|partition|subpartition" || true
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          pkgdir = Path.home() / ".local/var/pmbootstrap/cache_git/pmaports/main/postmarketos-initramfs"
-          fun = pkgdir / "init_functions.sh"
-          text = fun.read_text()
-
-          def rename_function(src: str, name: str, required: bool = True) -> str:
-              if f"{name}_orig()" in src:
-                  return src
-
-              pattern = rf'(?m)^([ \t]*){re.escape(name)}[ \t]*\(\)[ \t]*\{{'
-              if not re.search(pattern, src):
-                  if required:
-                      available = []
-                      for m in re.finditer(r'(?m)^[ \t]*([A-Za-z0-9_]+)[ \t]*\(\)[ \t]*\{', src):
-                          available.append(m.group(1))
-                      raise SystemExit(
-                          f"Required function not found: {name}(). "
-                          f"Available functions: {', '.join(available)}"
-                      )
-                  print(f"Optional function not found: {name}()")
-                  return src
-
-              return re.sub(pattern, rf'\1{name}_orig() {{', src, count=1)
-
-          text = rename_function(text, "find_root_partition", required=True)
-          text = rename_function(text, "wait_root_partition", required=True)
-          text = rename_function(text, "mount_root_partition", required=True)
-
-          marker = "# samsung-dream force root handoff patch V4"
-          if marker not in text:
-              text += r'''
-
-          # samsung-dream force root handoff patch V4
-          #
-          # Important:
-          # - Do NOT use kernel cmdline root=/dev/loop0p2.
-          # - The stock initramfs must first create loop0p1/loop0p2 from userdata.
-          # - After that, force pmOS_root to /dev/loop0p2 here.
-          #
-          # Expected layout:
-          #   /dev/loop0p1 = pmOS_boot
-          #   /dev/loop0p2 = pmOS_root
-
-          _samsung_dream_v4_log() {
-              msg="[samsung-dream-force-v4] $*"
-              echo "$msg" >&2
-              echo "$msg" >> /tmp/samsung-dream-force-v4.log 2>/dev/null || true
-              if [ -e /dev/kmsg ]; then
-                  echo "$msg" > /dev/kmsg 2>/dev/null || true
-              fi
-          }
-
-          _samsung_dream_v4_save_to_boot() {
-              if grep -q " /boot " /proc/mounts 2>/dev/null; then
-                  mount -o remount,rw /boot 2>/dev/null || true
-
-                  {
-                      echo
-                      echo "===== samsung-dream force root V4 ====="
-                      date 2>/dev/null || true
-
-                      echo "--- cmdline ---"
-                      cat /proc/cmdline 2>/dev/null || true
-
-                      echo "--- partitions ---"
-                      cat /proc/partitions 2>/dev/null || true
-
-                      echo "--- blkid ---"
-                      blkid 2>/dev/null || true
-
-                      echo "--- losetup ---"
-                      losetup -a 2>/dev/null || true
-
-                      echo "--- mounts ---"
-                      cat /proc/mounts 2>/dev/null || true
-
-                      echo "--- /sysroot ---"
-                      ls -lah /sysroot 2>/dev/null || true
-
-                      echo "--- temp log ---"
-                      cat /tmp/samsung-dream-force-v4.log 2>/dev/null || true
-                  } >> /boot/pmos-force-root-v4.txt 2>&1 || true
-
-                  sync 2>/dev/null || true
-                  mount -o remount,ro /boot 2>/dev/null || true
-              fi
-          }
-
-          _samsung_dream_v4_root() {
-              i=0
-              while [ "$i" -lt 45 ]; do
-                  for dev in /dev/loop0p2 /dev/disk/by-label/pmOS_root /dev/block/by-label/pmOS_root; do
-                      [ -b "$dev" ] || continue
-
-                      if blkid "$dev" 2>/dev/null | grep -q 'LABEL="pmOS_root"'; then
-                          echo "$dev"
-                          return 0
-                      fi
-                  done
-
-                  sleep 1
-                  i=$((i + 1))
-              done
-
-              return 1
-          }
-
-          find_root_partition() {
-              forced="$(_samsung_dream_v4_root 2>/dev/null || true)"
-
-              if [ -n "$forced" ]; then
-                  _samsung_dream_v4_log "find_root_partition forced to $forced"
-                  echo "$forced"
-                  return 0
-              fi
-
-              _samsung_dream_v4_log "forced root not found, fallback to original find_root_partition"
-              find_root_partition_orig "$@"
-          }
-
-          wait_root_partition() {
-              forced="$(_samsung_dream_v4_root 2>/dev/null || true)"
-
-              if [ -n "$forced" ]; then
-                  _samsung_dream_v4_log "wait_root_partition found $forced"
-                  root_partition="$forced"
-                  export root_partition
-                  echo "$forced"
-                  return 0
-              fi
-
-              _samsung_dream_v4_log "forced root not found in wait_root_partition, fallback"
-              wait_root_partition_orig "$@"
-          }
-
-          mount_root_partition() {
-              forced="$(_samsung_dream_v4_root 2>/dev/null || true)"
-
-              if [ -n "$forced" ]; then
-                  _samsung_dream_v4_log "mount_root_partition forced: $forced -> /sysroot"
-
-                  root_partition="$forced"
-                  export root_partition
-
-                  mkdir -p /sysroot 2>/dev/null || true
-
-                  if grep -q " /sysroot " /proc/mounts 2>/dev/null; then
-                      _samsung_dream_v4_log "/sysroot already mounted, unmounting"
-                      umount /sysroot 2>/dev/null || true
-                  fi
-
-                  _samsung_dream_v4_log "blkid forced root: $(blkid "$forced" 2>/dev/null || true)"
-
-                  mount -t ext4 -o rw "$forced" /sysroot 2>/tmp/samsung-dream-v4-mount.err || \
-                  mount -t ext4 -o ro "$forced" /sysroot 2>>/tmp/samsung-dream-v4-mount.err || {
-                      _samsung_dream_v4_log "mount failed"
-                      cat /tmp/samsung-dream-v4-mount.err >> /tmp/samsung-dream-force-v4.log 2>/dev/null || true
-                      _samsung_dream_v4_save_to_boot
-                      return 1
-                  }
-
-                  _samsung_dream_v4_log "mount OK"
-
-                  mkdir -p /sysroot/var/log 2>/dev/null || true
-
-                  {
-                      echo "samsung-dream-force-v4 mounted root"
-                      date 2>/dev/null || true
-                      echo "forced=$forced"
-
-                      echo "--- cmdline ---"
-                      cat /proc/cmdline 2>/dev/null || true
-
-                      echo "--- blkid ---"
-                      blkid 2>/dev/null || true
-
-                      echo "--- mounts ---"
-                      cat /proc/mounts 2>/dev/null || true
-
-                      echo "--- init check ---"
-                      ls -lah /sysroot/sbin/init /sysroot/lib/systemd/systemd /sysroot/usr/lib/systemd/systemd 2>/dev/null || true
-
-                      echo "--- /sysroot root ---"
-                      ls -lah /sysroot 2>/dev/null || true
-                  } >> /sysroot/var/log/pmos-force-root-v4-mounted.txt 2>&1 || true
-
-                  if [ ! -e /sysroot/sbin/init ] && [ ! -e /sysroot/lib/systemd/systemd ] && [ ! -e /sysroot/usr/lib/systemd/systemd ]; then
-                      _samsung_dream_v4_log "mounted root but no init/systemd found"
-                      _samsung_dream_v4_save_to_boot
-                      return 1
-                  fi
-
-                  sync 2>/dev/null || true
-                  _samsung_dream_v4_save_to_boot
-                  return 0
-              fi
-
-              _samsung_dream_v4_log "forced root not found in mount_root_partition, fallback"
-              mount_root_partition_orig "$@"
-          }
-
-          '''
-          fun.write_text(text)
-          PY
-
-          echo "Show V4 markers in source:"
-          grep -n "samsung-dream-force-v4\|pmos-force-root-v4\|pmos-force-root-v4-mounted" "$FUN" || true
-
-          echo "Bump pkgrel:"
-          sed -i 's/^pkgrel=.*/pkgrel=1004/' "$APKBUILD"
-
-          echo "Update checksum:"
-          pmbootstrap --details-to-stdout checksum postmarketos-initramfs
-
-          echo "Build patched postmarketos-initramfs for TARGET ARCH aarch64:"
-          pmbootstrap --details-to-stdout build --force --arch=aarch64 postmarketos-initramfs
-
-          echo "Verify built APK contains V4 marker:"
-          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'postmarketos-initramfs-*.apk' | grep '/aarch64/' | sort | tail -n 1)"
-          echo "APK=$APK"
-          test -n "$APK"
-
-          mkdir -p /tmp/check-initramfs-apk
-          tar -xzf "$APK" -C /tmp/check-initramfs-apk
-
-          grep -Rsn "samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt" /tmp/check-initramfs-apk || {
-            echo "ERROR: built aarch64 postmarketos-initramfs APK does not contain V4 marker"
-            exit 1
-          }
-
-          echo "Built aarch64 postmarketos-initramfs APK contains V4 marker OK"
 
       - name: Build Android recovery ZIP
         run: |
@@ -392,65 +163,6 @@ jobs:
             --no-fde \
             --password "123456"
 
-      - name: Verify FORCE ROOT V4 marker exists
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "1) Verify V4 marker in pmaports source:"
-          PMAPORTS="$HOME/.local/var/pmbootstrap/cache_git/pmaports"
-          grep -Rsn "samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt" "$PMAPORTS/main/postmarketos-initramfs"
-
-          echo "2) Verify V4 marker in built aarch64 APK:"
-          APK="$(find "$HOME/.local/var/pmbootstrap/packages" -type f -name 'postmarketos-initramfs-*.apk' | grep '/aarch64/' | sort | tail -n 1)"
-          echo "APK=$APK"
-          test -n "$APK"
-
-          rm -rf /tmp/check-initramfs-apk
-          mkdir -p /tmp/check-initramfs-apk
-          tar -xzf "$APK" -C /tmp/check-initramfs-apk
-
-          grep -Rsn "samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt" /tmp/check-initramfs-apk
-
-          echo "3) Verify V4 marker in generated boot/initramfs files only:"
-          found=0
-
-          while IFS= read -r f; do
-            echo "=== checking generated file: $f ==="
-            file "$f" || true
-
-            if grep -a -q 'samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt' "$f"; then
-              echo "RAW_V4_MARKER_FOUND_IN=$f"
-              grep -aH 'samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt' "$f" || true
-              found=1
-            fi
-
-            for cmd in "gzip -dc" "zcat" "xzcat" "lz4cat" "zstdcat"; do
-              if $cmd "$f" >/tmp/decompressed.out 2>/dev/null; then
-                if grep -a -q 'samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt' /tmp/decompressed.out; then
-                  echo "DECOMPRESSED_V4_MARKER_FOUND_IN=$f via $cmd"
-                  grep -aH 'samsung-dream-force-v4\|pmos-force-root-v4-mounted\|pmos-force-root-v4.txt' /tmp/decompressed.out || true
-                  found=1
-                fi
-              fi
-            done
-          done < <(
-            find "$HOME/.local/var/pmbootstrap" -type f \
-              \( -name 'initramfs' -o -name 'initramfs-extra' -o -name 'boot.img' \) \
-              ! -path '*/pmaports/*' \
-              ! -path '*/cache_git/*' \
-              | sort
-          )
-
-          if [ "$found" -ne 1 ]; then
-            echo "ERROR: V4 marker not found in generated boot/initramfs files."
-            echo "This means the patched package was built but did not get installed into the rootfs/initramfs."
-            echo "Do not flash this build."
-            exit 1
-          fi
-
-          echo "V4 marker found in generated boot/initramfs files OK"
-
       - name: Export files
         run: |
           mkdir -p out
@@ -458,31 +170,38 @@ jobs:
           find out -maxdepth 2 -type f -print
           ls -lh out
 
-      - name: Rename and mark FORCE ROOT V4 artifact
+      - name: Rename and mark SECTOR4096 clean artifact
         shell: bash
         run: |
           set -euxo pipefail
           cd out
 
+          echo "Before rename:"
+          find . -maxdepth 1 -type f -print
+          ls -lh
+
           test -f ./pmos-samsung-dream.zip
 
-          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-FORCE-ROOT-V4.zip
+          mv ./pmos-samsung-dream.zip ./pmos-samsung-dream-SECTOR4096-CLEAN-V1.zip
 
           {
-            echo "FORCE_ROOT_V4_BUILD=YES"
+            echo "SECTOR4096_CLEAN_BUILD=YES"
+            echo "NO_ROOT_LOOP0P2_CMDLINE=YES"
+            echo "NO_FORCE_ROOT_V4=YES"
             echo "RUN_ID=${{ github.run_id }}"
             echo "RUN_NUMBER=${{ github.run_number }}"
             echo "UI=${{ github.event.inputs.ui }}"
             echo "DATE_UTC=$(date -u)"
-          } > ./BUILD_MARKER_FORCE_ROOT_V4.txt
+          } > ./BUILD_MARKER_SECTOR4096_CLEAN_V1.txt
 
+          echo "After rename:"
           find . -maxdepth 1 -type f -print
           ls -lh
 
       - name: Upload postmarketOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-FORCE-ROOT-V4
+          name: postmarketOS-samsung-dream2lte-${{ github.event.inputs.ui }}-SECTOR4096-CLEAN-V1
           path: out/**
           if-no-files-found: error
           retention-days: 7
